@@ -1,0 +1,24 @@
+{
+  "name": "artvas",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Artvas - a free, browser-based graphic design editor",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node server.js",
+    "preview": "npm run build && npm start"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "4.22.3",
+    "fabric": "6.9.1",
+    "jspdf": "2.5.2"
+  },
+  "devDependencies": {
+    "vite": "5.4.21"
+  }
+}
