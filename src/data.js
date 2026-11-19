@@ -1,3 +1,5 @@
+import { MORE_TEMPLATES } from './templates2.js';
+
 // Static data: design sizes, fonts, colors, elements, templates.
 
 export const SIZE_PRESETS = [
@@ -120,8 +122,8 @@ export const TEMPLATES = [
     bg: { gradient: ['#0f172a', '#1e3a8a'] },
     items: [
       { t: 'shape', shape: 'burst', x: 0.78, y: 0.2, s: 0.28, fill: '#facc15' },
-      { t: 'text', text: 'LIVE\nMUSIC', x: 0.4, y: 0.38, w: 0.8, size: 0.17, font: 'Bebas Neue', fill: '#fff', align: 'left' },
-      { t: 'text', text: 'Friday Night Sessions', x: 0.4, y: 0.6, w: 0.8, size: 0.05, font: 'Space Grotesk', weight: '700', fill: '#93c5fd', align: 'left' },
+      { t: 'text', text: 'LIVE\nMUSIC', x: 0.47, y: 0.38, w: 0.8, size: 0.17, font: 'Bebas Neue', fill: '#fff', align: 'left' },
+      { t: 'text', text: 'Friday Night Sessions', x: 0.47, y: 0.6, w: 0.8, size: 0.05, font: 'Space Grotesk', weight: '700', fill: '#93c5fd', align: 'left' },
       { t: 'rect', x: 0.5, y: 0.82, w: 0.9, h: 0.003, fill: '#334155' },
       { t: 'text', text: 'JUNE 21 · 8 PM · CITY HALL', x: 0.5, y: 0.89, size: 0.035, font: 'Space Grotesk', weight: '700', fill: '#e2e8f0', charSpacing: 200 },
     ],
@@ -211,7 +213,7 @@ TEMPLATES.push(
     cat: 'Social',
     bg: { gradient: ['#111827', '#7f1d1d'], angle: 90 },
     items: [
-      { t: 'text', text: '30 DAY', x: 0.5, y: 0.25, size: 0.1, font: 'Bebas Neue', fill: '#f87171', charSpacing: 200 },
+      { t: 'text', text: '30 DAY', x: 0.5, y: 0.17, size: 0.1, font: 'Bebas Neue', fill: '#f87171', charSpacing: 200 },
       { t: 'text', text: 'FITNESS\nCHALLENGE', x: 0.5, y: 0.45, w: 0.9, size: 0.15, font: 'Anton', fill: '#ffffff' },
       { t: 'rect', x: 0.5, y: 0.7, w: 0.5, h: 0.006, fill: '#f87171' },
       { t: 'text', text: 'Join us · Starts Monday', x: 0.5, y: 0.78, size: 0.04, font: 'Oswald', fill: '#fecaca' },
@@ -376,6 +378,29 @@ TEMPLATES.push(
     ],
   }
 );
+
+TEMPLATES.push(...MORE_TEMPLATES);
+
+export const FORMATS = {
+  ig: { name: 'Instagram Post', w: 1080, h: 1080 },
+  yt: { name: 'YouTube Thumbnail', w: 1280, h: 720 },
+  story: { name: 'Instagram Story', plural: 'Instagram Stories', w: 1080, h: 1920 },
+  pres: { name: 'Presentation', w: 1920, h: 1080 },
+  poster: { name: 'Poster / Flyer', plural: 'Posters & Flyers', w: 2480, h: 3508 },
+  card: { name: 'Business Card', w: 1050, h: 600 },
+  invite: { name: 'Invitation', w: 1500, h: 2100 },
+  resume: { name: 'Resume', w: 2550, h: 3300 },
+  logo: { name: 'Logo', w: 500, h: 500 },
+  fbcover: { name: 'Facebook Cover', w: 1640, h: 624 },
+};
+const DEFAULT_FMT = { 'YouTube Hook': 'yt', 'Business Card': 'card', 'Business Pitch': 'pres', 'Wedding Invite': 'invite' };
+TEMPLATES.forEach((t) => { if (!t.fmt) t.fmt = DEFAULT_FMT[t.name] || 'ig'; });
+
+/** Format keys whose aspect ratio matches w×h (within 1%). */
+export function formatsFor(w, h) {
+  const r = w / h;
+  return Object.entries(FORMATS).filter(([, f]) => Math.abs(f.w / f.h - r) / r < 0.01).map(([k]) => k);
+}
 
 const DEFAULT_CATS = {
   'Bold Sale': 'Sale', 'Minimal Quote': 'Quote', 'Event Poster': 'Event', Birthday: 'Cards', 'Business Pitch': 'Business',

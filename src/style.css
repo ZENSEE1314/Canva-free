@@ -295,6 +295,17 @@ kbd { background: #f1f0f5; border: 1px solid var(--line); border-bottom-width: 2
 .mine-row .mt-thumb { height: 170px; aspect-ratio: auto !important; }
 .flabel { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
 
+/* Formats & placeholders */
+.fmt-title { font-size: 15px; margin: 18px 0 10px; color: var(--ink-2); }
+.fmt-title small { color: var(--muted); font-weight: 500; font-size: 12px; margin-left: 6px; }
+.tpl-row .tpl-card img { aspect-ratio: auto; height: auto; }
+.tpl-row .tpl-card { flex-grow: 0; flex-shrink: 0; }
+.tpl-card small { display: block; color: var(--muted); font-size: 11px; }
+.fmt-select { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; margin: 8px 0 0; background: #fff; }
+.ph-box { background: var(--brand-soft); border-radius: 12px; padding: 14px; margin-bottom: 16px; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px; color: var(--brand); }
+.ph-box b { color: var(--ink); }
+.ph-box .btn { margin-bottom: 0; }
+
 /* Responsive */
 @media (max-width: 1100px) {
   .props { width: 240px; }

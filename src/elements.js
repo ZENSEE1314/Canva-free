@@ -1,4 +1,4 @@
-import { Rect, Circle, Triangle, Polygon, Path, Line, Textbox, Gradient } from 'fabric';
+import { Rect, Circle, Triangle, Polygon, Path, Line, Textbox, Gradient, Shadow } from 'fabric';
 
 function regularPolygon(sides, r, rot = -Math.PI / 2) {
   const pts = [];
@@ -115,8 +115,10 @@ export function buildTemplate(tpl, W, H) {
         fill: it.fill || '#111827',
         textAlign: it.align || 'center',
         width: (it.w || 0.9) * W,
-        lineHeight: 1.05,
+        lineHeight: it.lh || 1.05,
         charSpacing: it.charSpacing || 0,
+        textBackgroundColor: it.bgc || '',
+        shadow: it.shadow ? new Shadow({ color: it.shadow, blur: m * 0.02, offsetX: m * 0.006, offsetY: m * 0.008 }) : null,
         stroke: it.stroke || null,
         strokeWidth: it.strokeW ? it.strokeW * m : 0,
         paintFirst: 'stroke',
@@ -139,6 +141,12 @@ export function buildTemplate(tpl, W, H) {
         originY: 'center',
         name: 'Rectangle',
       });
+    } else if (it.t === 'photo') {
+      o = createPhotoPlaceholder(it.r ? it.r * 2 * m : it.w * W, it.r ? it.r * 2 * m : it.h * H, {
+        rx: it.r ? it.r * m : it.rx ? it.rx * m : 0,
+        fill: it.fill,
+      });
+      o.set({ originX: 'center', originY: 'center' });
     } else if (it.t === 'circle') {
       o = new Circle({ radius: it.r * m, fill: it.fill, originX: 'center', originY: 'center', name: 'Circle' });
     } else if (it.t === 'shape') {
@@ -147,8 +155,26 @@ export function buildTemplate(tpl, W, H) {
     }
     if (!o) continue;
     o.set({ left: it.x * W, top: it.y * H });
+    if (it.angle && it.t !== 'text' && it.t !== 'emoji') o.set({ angle: it.angle });
+    if (it.opacity != null) o.set({ opacity: it.opacity });
     o.setCoords();
     objects.push(o);
   }
   return objects;
+}
+
+/** A grey box that marks where the user should drop a photo. */
+export function createPhotoPlaceholder(w, h, { rx = 0, fill } = {}) {
+  return new Rect({
+    width: w,
+    height: h,
+    rx,
+    ry: rx,
+    fill: fill || '#cbd5e1',
+    stroke: 'rgba(255,255,255,0.6)',
+    strokeWidth: Math.max(2, Math.min(w, h) * 0.008),
+    strokeDashArray: [Math.max(6, Math.min(w, h) * 0.03), Math.max(6, Math.min(w, h) * 0.02)],
+    name: 'Photo placeholder',
+    placeholder: true,
+  });
 }

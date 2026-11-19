@@ -6,16 +6,16 @@ import {
 import { jsPDF } from 'jspdf';
 import { saveDesign, getDesign, listDesigns, deleteDesign, uid, listVersions, saveVersion, getVersion, deleteVersion, kvGet, kvSet } from './storage.js';
 import {
-  SIZE_PRESETS, FONTS, PALETTE, GRADIENTS, TEXT_PRESETS, TEXT_COMBOS, SHAPES, STICKERS, TEMPLATES, TEMPLATE_CATS,
+  SIZE_PRESETS, FONTS, PALETTE, GRADIENTS, TEXT_PRESETS, TEXT_COMBOS, SHAPES, STICKERS, TEMPLATES, TEMPLATE_CATS, FORMATS, formatsFor,
 } from './data.js';
 import { removeBackgroundAI, removeColor } from './bgremove.js';
 import { ANIMATIONS, PAGE_PRESETS, playPreview, exportGIF, exportVideo, animationLength, videoMime } from './animate.js';
-import { createShape, makeGradient, buildTemplate } from './elements.js';
+import { createShape, makeGradient, buildTemplate, createPhotoPlaceholder } from './elements.js';
 import { icon } from './icons.js';
 
 const PROPS = [
   'name', 'locked', 'selectable', 'evented', 'hasControls', 'lockMovementX', 'lockMovementY',
-  'lockRotation', 'lockScalingX', 'lockScalingY', 'bgGradient', 'anim',
+  'lockRotation', 'lockScalingX', 'lockScalingY', 'bgGradient', 'anim', 'placeholder',
 ];
 
 const app = document.getElementById('app');
@@ -39,6 +39,7 @@ const state = {
   photosPage: 1,
   uploads: [],
   tplCat: 'All',
+  tplFmt: 'fit',
   brand: { colors: [], headingFont: 'Montserrat', bodyFont: 'Inter', logos: [], fonts: [] },
   lastVersionAt: 0,
   myTemplates: [],
@@ -114,10 +115,17 @@ async function renderHome() {
       <div class="tpl-row mine-row">${myTemplateCards()}</div>
     </section>` : ''}
     <section class="home-section">
-      <h2>Start from a template</h2>
-      <div class="tpl-row">
-        ${TEMPLATES.map((t, i) => `<button class="tpl-card" data-t="${i}"><img alt="${esc(t.name)}" data-tplthumb="${i}"><span>${esc(t.name)}</span></button>`).join('')}
-      </div>
+      <h2>Start from a template <small>(${TEMPLATES.length})</small></h2>
+      ${Object.entries(FORMATS)
+        .map(([key, f]) => {
+          const list = TEMPLATES.map((t, i) => [t, i]).filter(([t]) => t.fmt === key);
+          if (!list.length) return '';
+          return `<h3 class="fmt-title">${f.plural || f.name + 's'} <small>${f.w} × ${f.h}</small></h3>
+          <div class="tpl-row">${list
+            .map(([t, i]) => `<button class="tpl-card" data-t="${i}" style="flex-basis:${Math.round(150 * Math.max(0.6, Math.min(1.9, f.w / f.h)))}px"><img alt="${esc(t.name)}" data-tplthumb="${i}" style="aspect-ratio:${f.w}/${f.h}"><span>${esc(t.name)}</span></button>`)
+            .join('')}</div>`;
+        })
+        .join('')}
     </section>
     <section class="home-section">
       <h2>Your designs ${designs.length ? `<small>(${designs.length})</small>` : ''}</h2>
@@ -158,7 +166,11 @@ async function renderHome() {
   $('#openFile').onchange = (e) => importDesignFile(e.target.files[0]);
   bindMyTemplateCards(app, (id) => newDesignFromMyTemplate(id), renderHome);
   $$('[data-t]').forEach((b) =>
-    b.addEventListener('click', () => newDesign(1080, 1080, TEMPLATES[+b.dataset.t].name, +b.dataset.t))
+    b.addEventListener('click', () => {
+      const t = TEMPLATES[+b.dataset.t];
+      const f = FORMATS[t.fmt] || FORMATS.ig;
+      newDesign(f.w, f.h, t.name, +b.dataset.t);
+    })
   );
   $$('.design-card').forEach((c) =>
     c.addEventListener('click', (e) => {
@@ -180,12 +192,33 @@ async function renderHome() {
       renderHome();
     })
   );
-  // template thumbnails
+  // template thumbnails (rendered when scrolled into view)
   await fontsReady;
-  for (let i = 0; i < TEMPLATES.length; i++) {
-    const img = $(`[data-tplthumb="${i}"]`);
-    if (img) img.src = await templateThumb(i, 1080, 1080, 260);
-  }
+  lazyThumbs($$('[data-tplthumb]'), (img) => {
+    const t = TEMPLATES[+img.dataset.tplthumb];
+    const f = FORMATS[t.fmt] || FORMATS.ig;
+    return templateThumb(+img.dataset.tplthumb, f.w, f.h, 300);
+  });
+}
+
+/** Render thumbnails only when they scroll into view, one at a time. */
+function lazyThumbs(imgs, render) {
+  let queue = Promise.resolve();
+  const io = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        io.unobserve(e.target);
+        const img = e.target;
+        queue = queue.then(async () => {
+          if (!img.isConnected) return;
+          try { img.src = await render(img); } catch (err) { console.warn(err); }
+        });
+      }
+    },
+    { rootMargin: '300px' }
+  );
+  imgs.forEach((img) => io.observe(img));
 }
 
 function logoSvg() {
@@ -1017,7 +1050,46 @@ function addSticker(ch) {
   return place(t);
 }
 
+async function fillPlaceholder(ph, src) {
+  const c = state.canvas;
+  const img = await FabricImage.fromURL(src, { crossOrigin: 'anonymous' });
+  const w = ph.width * ph.scaleX;
+  const h = ph.height * ph.scaleY;
+  const s = Math.max(w / img.width, h / img.height);
+  const center = ph.getCenterPoint();
+  const rx = (ph.rx || 0) * ph.scaleX;
+  img.set({ scaleX: s, scaleY: s, originX: 'center', originY: 'center', left: center.x, top: center.y, angle: ph.angle || 0, name: 'Photo' });
+  img.clipPath = new Rect({ width: w / s, height: h / s, rx: rx / s, ry: rx / s, originX: 'center', originY: 'center' });
+  const idx = c.getObjects().indexOf(ph);
+  state.loading = true;
+  c.remove(ph);
+  c.insertAt(idx, img);
+  state.loading = false;
+  img.setCoords();
+  c.setActiveObject(img);
+  c.requestRenderAll();
+  pushHistory();
+  schedulePersist();
+  renderLayersIfOpen();
+  renderProps();
+  return img;
+}
+
+function addPhotoPlaceholder() {
+  const m = minSide() * 0.5;
+  return place(createPhotoPlaceholder(m, m * 0.75, {}));
+}
+
 async function addImage(src, opts = {}) {
+  const active = state.canvas.getActiveObject();
+  if (active?.placeholder && !opts.noFill) {
+    try {
+      return await fillPlaceholder(active, src);
+    } catch (e) {
+      console.error(e);
+      return toast('Could not load image');
+    }
+  }
   try {
     const img = await FabricImage.fromURL(src, { crossOrigin: 'anonymous' });
     const { width: W, height: H } = state.design;
@@ -1127,15 +1199,21 @@ function setBackgroundFill(bg, record = true) {
   }
 }
 
+const thumbCache = new Map();
 async function templateThumb(i, W, H, size) {
+  const key = `${i}:${W}x${H}:${size}`;
+  if (thumbCache.has(key)) return thumbCache.get(key);
+  const k = Math.min(1, size / Math.max(W, H)) * 1.5;
   const el = document.createElement('canvas');
-  const sc = new StaticCanvas(el, { width: W, height: H, enableRetinaScaling: false, renderOnAddRemove: false });
+  const sc = new StaticCanvas(el, { width: Math.round(W * k), height: Math.round(H * k), enableRetinaScaling: false, renderOnAddRemove: false });
+  sc.setZoom(k);
   const tpl = TEMPLATES[i];
   sc.backgroundColor = tpl.bg.gradient ? makeGradient(tpl.bg.gradient, W, H, tpl.bg.angle ?? 135) : tpl.bg.color;
   buildTemplate(tpl, W, H).forEach((o) => sc.add(o));
   sc.renderAll();
-  const url = sc.toDataURL({ format: 'jpeg', quality: 0.8, multiplier: size / W });
+  const url = sc.toDataURL({ format: 'jpeg', quality: 0.82 });
   sc.dispose();
+  thumbCache.set(key, url);
   return url;
 }
 
@@ -1170,11 +1248,17 @@ function renderTab() {
 
 async function tabTemplates(p) {
   const mine = state.myTemplates;
+  const fits = formatsFor(state.design.width, state.design.height);
   const cats = [TEMPLATE_CATS[0], ...(mine.length ? ['Mine'] : []), ...TEMPLATE_CATS.slice(1)];
   if (!cats.includes(state.tplCat)) state.tplCat = 'All';
   p.innerHTML = `<h3>Templates</h3>
     <button class="btn primary block" id="saveTpl">${icon('save')} Save this design as a template</button>
     <input class="search" id="tplSearch" placeholder="Search templates…">
+    <select id="tplFmt" class="fmt-select">
+      <option value="fit">Fits this design${fits.length ? ` (${fits.map((k) => FORMATS[k].name).join(', ')})` : ''}</option>
+      <option value="all">All formats</option>
+      ${Object.entries(FORMATS).map(([k, f]) => `<option value="${k}">${f.name}</option>`).join('')}
+    </select>
     <div class="chips">${cats.map((c) => `<button class="chip ${state.tplCat === c ? 'on' : ''}" data-cat="${c}">${c === 'Mine' ? 'My templates' : c}</button>`).join('')}</div>
     <div id="mineWrap">
       <div class="row"><h4 style="margin:6px 0">My templates ${mine.length ? `<small class="muted">(${mine.length})</small>` : ''}</h4><span class="spacer"></span>
@@ -1185,13 +1269,15 @@ async function tabTemplates(p) {
     </div>
     <h4 id="builtinTitle">Artvas templates</h4>
     <div class="tpl-grid" id="builtinGrid">${TEMPLATES.map(
-      (t, i) => `<button class="tpl-card" data-ti="${i}" data-name="${esc(t.name.toLowerCase())} ${t.cat.toLowerCase()}" data-tcat="${t.cat}"><img data-tthumb="${i}" alt=""><span>${esc(t.name)}</span></button>`
+      (t, i) => `<button class="tpl-card" data-ti="${i}" data-name="${esc(t.name.toLowerCase())} ${t.cat.toLowerCase()} ${FORMATS[t.fmt].name.toLowerCase()}" data-tcat="${t.cat}" data-fmt="${t.fmt}"><img data-tthumb="${i}" alt="" style="aspect-ratio:${state.design.width}/${state.design.height}"><span>${esc(t.name)}</span><small>${FORMATS[t.fmt].name}</small></button>`
     ).join('')}</div>`;
   const filter = () => {
     const q = $('#tplSearch', p).value.toLowerCase();
     const cat = state.tplCat;
+    const fmt = state.tplFmt;
+    const fmtOk = (f) => fmt === 'all' || (fmt === 'fit' ? !fits.length || fits.includes(f) || q : f === fmt);
     $$('[data-ti]', p).forEach((b) => {
-      const ok = (cat === 'All' || b.dataset.tcat === cat) && b.dataset.name.includes(q);
+      const ok = (cat === 'All' || b.dataset.tcat === cat) && b.dataset.name.includes(q) && fmtOk(b.dataset.fmt);
       b.style.display = ok ? '' : 'none';
     });
     $$('[data-mt]', p).forEach((b) => {
@@ -1202,6 +1288,11 @@ async function tabTemplates(p) {
     $('#builtinGrid', p).style.display = cat === 'Mine' ? 'none' : '';
   };
   $('#tplSearch', p).oninput = filter;
+  $('#tplFmt', p).value = state.tplFmt;
+  $('#tplFmt', p).onchange = (e) => {
+    state.tplFmt = e.target.value;
+    filter();
+  };
   $$('[data-cat]', p).forEach(
     (b) =>
       (b.onclick = () => {
@@ -1222,12 +1313,7 @@ async function tabTemplates(p) {
   bindMyTemplateCards(p, (id) => applyMyTemplate(id), () => tabTemplates(p));
   $$('[data-ti]', p).forEach((b) => (b.onclick = () => applyTemplate(+b.dataset.ti)));
   const { width: W, height: H } = state.design;
-  for (let i = 0; i < TEMPLATES.length; i++) {
-    const img = $(`[data-tthumb="${i}"]`, p);
-    if (!img || !img.isConnected) return;
-    img.style.aspectRatio = `${W}/${H}`;
-    img.src = await templateThumb(i, W, H, 200);
-  }
+  lazyThumbs($$('[data-tthumb]', p), (img) => templateThumb(+img.dataset.tthumb, W, H, 220));
 }
 
 function tabText(p) {
@@ -1264,6 +1350,8 @@ function tabElements(p) {
     <input class="search" id="elSearch" placeholder="Search shapes & stickers…">
     <h4>Shapes & lines</h4>
     <div class="shape-grid">${SHAPES.map((s) => `<button class="shape-item" data-shape="${s.id}" title="${s.label}">${shapePreview(s.id)}<small>${s.label}</small></button>`).join('')}</div>
+    <h4>Photo placeholder</h4>
+    <button class="btn ghost block" id="addPh">${icon('image')} Add photo placeholder</button>
     <h4>Frames <small class="muted">(select an image, then pick a frame)</small></h4>
     <div class="shape-grid">
       ${['none', 'circle', 'rounded', 'star', 'heart', 'hexagon'].map((f) => `<button class="shape-item" data-frame="${f}">${f === 'none' ? icon('x') : shapePreview(f)}<small>${f === 'none' ? 'No frame' : f}</small></button>`).join('')}
@@ -1271,6 +1359,7 @@ function tabElements(p) {
     <h4>Stickers</h4>
     <div class="sticker-grid">${STICKERS.map((s) => `<button class="sticker" data-st="${s}">${s}</button>`).join('')}</div>`;
   $$('[data-shape]', p).forEach((b) => (b.onclick = () => addShape(b.dataset.shape)));
+  $('#addPh', p).onclick = addPhotoPlaceholder;
   $$('[data-st]', p).forEach((b) => (b.onclick = () => addSticker(b.dataset.st)));
   $$('[data-frame]', p).forEach((b) => (b.onclick = () => applyFrame(b.dataset.frame)));
   $('#elSearch').oninput = (e) => {
@@ -1625,6 +1714,10 @@ function renderProps() {
     <div class="field"><label>Highlight</label><div class="row"><input type="color" id="pTBG" value="${toHex(text.textBackgroundColor || '#ffff00')}"><button class="btn ghost small" id="pTBGx">${text.textBackgroundColor ? 'Remove' : 'None'}</button></div></div>
     <div class="field"><label>Outline</label><div class="row"><input type="color" id="pStroke" value="${toHex(text.stroke || '#000000')}"><input type="range" min="0" max="${Math.round(text.fontSize / 4)}" step="0.5" value="${text.strokeWidth || 0}" id="pSW"></div></div>
     ` : ''}
+    ${o.placeholder ? `<div class="ph-box">${icon('image', 28)}<b>Photo placeholder</b>
+      <p class="muted">Upload a photo, or click any image in Uploads, Photos or Brand Kit logos to fill this frame.</p>
+      <button class="btn primary block" id="phUpload">${icon('upload')} Upload photo</button>
+      <button class="btn ghost block" id="phPhotos">${icon('image')} Choose from Photos</button></div>` : ''}
     ${!text && !img ? `
     <div class="field"><label>${o.type === 'line' ? 'Line color' : 'Fill'}</label>${colorPicker('pFill', o.type === 'line' || (o.type === 'path' && !o.fill) ? o.stroke : fill)}</div>
     ${!multi && o.type !== 'line' && o.type !== 'group' ? `<div class="field"><label>Gradient fill</label><div class="grad-grid small">${GRADIENTS.slice(0, 8).map((g, i) => `<button class="grad" data-og="${i}" style="background:linear-gradient(135deg,${g[0]},${g[1]})"></button>`).join('')}</div></div>` : ''}
@@ -1758,6 +1851,23 @@ function bindProps(o, text, img) {
     if (e) e[ev] = fn;
   };
   const commit = () => { pushHistory(); schedulePersist(); };
+
+  // photo placeholder
+  on('phUpload', 'onclick', () => {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = 'image/*';
+    inp.onchange = async () => {
+      const f = inp.files[0];
+      if (!f) return;
+      const url = await shrinkDataURL(await fileToDataURL(f));
+      state.uploads.unshift(url);
+      saveUploads();
+      await fillPlaceholder(o, url);
+    };
+    inp.click();
+  });
+  on('phPhotos', 'onclick', () => $('[data-tab="photos"]').click());
 
   // quick bar
   $$('[data-q]').forEach((b) => (b.onclick = () => runAction(b.dataset.q).then(renderProps)));
@@ -2654,4 +2764,4 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && sta
 boot();
 
 // expose a tiny API for debugging/testing
-window.artvas = { state, addText, addShape, addImage, exportDesign, util };
+window.artvas = { state, addText, addShape, addImage, exportDesign, util, templateThumb, TEMPLATES, FORMATS };

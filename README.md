@@ -5,7 +5,8 @@ Artvas is a free design editor that runs in the browser. Use it to make social p
 ## Features
 
 - **Start screen**: 18 size presets (Instagram, Story, YouTube, Presentation, A4 poster, business card and more), custom sizes, your saved designs (open, duplicate, delete), and opening a `.json` project file.
-- **Templates**: 25 ready-made templates with search and categories (Sale, Social, Business, Food, Holiday, Cards, Quote, Event). Each one scales to any canvas size and stays fully editable.
+- **Templates**: 74 original Artvas templates in 10 formats: 37 Instagram posts, 15 YouTube thumbnails, Instagram Stories, presentations, posters and flyers, business cards, invitations, a resume, logos and Facebook covers. You can search them and filter by category or format, and the editor shows templates that fit your design's size first. Each one scales to any canvas size and stays fully editable.
+- **Photo placeholders**: dashed frames in templates. Select one and upload a photo, or click any image in Uploads, Photos or your Brand Kit logos, and it fills the frame cropped to fit. You can also add your own placeholders from the Elements tab.
 - **Text**: heading, subheading and body presets, styled font combinations, and 29 fonts. You can set bold, italic, underline, strikethrough, alignment, uppercase or lowercase, line height, letter spacing, highlight, outline, shadow and glow.
 - **Elements**: 18 shapes and lines (star, heart, arrow, speech bubble, burst, blob and others), 64 stickers, and image frames (circle, rounded, star, heart, hexagon).
 - **Uploads**: upload images, drag and drop them onto the canvas, or paste them from the clipboard. Your recent uploads are kept.
