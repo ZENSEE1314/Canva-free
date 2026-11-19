@@ -1,0 +1,4 @@
+Artvas element packs include artwork from:
+- Microsoft Fluent Emoji (3D) - MIT License - https://github.com/microsoft/fluentui-emoji (via @lobehub/fluent-emoji-3d)
+- Google Noto Emoji - Apache License 2.0 - https://github.com/googlefonts/noto-emoji (via @iconify-json/noto)
+- Lucide icons - ISC License - https://lucide.dev

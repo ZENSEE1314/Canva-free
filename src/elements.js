@@ -26,6 +26,7 @@ const PATHS = {
   cloud: 'M25 80 Q5 80 5 62 Q5 46 22 44 Q22 22 44 20 Q60 6 76 22 Q96 22 96 44 Q100 60 88 70 Q84 80 72 80 Z',
   blob: 'M60 4 C82 6 98 24 96 48 C94 72 78 96 52 96 C26 96 4 80 4 54 C4 28 32 2 60 4 Z',
   ring: 'M50 0 A50 50 0 1 1 49.99 0 Z M50 18 A32 32 0 1 0 50.01 18 Z',
+  arch: 'M0 100 V50 A50 50 0 0 1 100 50 V100 Z',
 };
 
 /** Build a shape object. `size` is the target bounding size in design px. */

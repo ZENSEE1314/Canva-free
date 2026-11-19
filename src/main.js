@@ -11,11 +11,15 @@ import {
 import { removeBackgroundAI, removeColor } from './bgremove.js';
 import { ANIMATIONS, PAGE_PRESETS, playPreview, exportGIF, exportVideo, animationLength, videoMime } from './animate.js';
 import { createShape, makeGradient, buildTemplate, createPhotoPlaceholder } from './elements.js';
+import {
+  PACK_CATS, loadPack, flatSrc, loadIcons, POPULAR_ICONS, iconSVG, createIcon, CHART_PRESETS, buildChart, TABLE_PRESETS, buildTable,
+  GRIDS, buildGrid, gridPreview, FRAMES, buildFrame, GRADIENT_ELEMENTS, buildGradientElement, gradientPreview,
+} from './library.js';
 import { icon } from './icons.js';
 
 const PROPS = [
   'name', 'locked', 'selectable', 'evented', 'hasControls', 'lockMovementX', 'lockMovementY',
-  'lockRotation', 'lockScalingX', 'lockScalingY', 'bgGradient', 'anim', 'placeholder',
+  'lockRotation', 'lockScalingX', 'lockScalingY', 'bgGradient', 'anim', 'placeholder', 'frameShape', 'kind', 'chart', 'table',
 ];
 
 const app = document.getElementById('app');
@@ -1087,7 +1091,13 @@ async function fillPlaceholder(ph, src) {
   const center = ph.getCenterPoint();
   const rx = (ph.rx || 0) * ph.scaleX;
   img.set({ scaleX: s, scaleY: s, originX: 'center', originY: 'center', left: center.x, top: center.y, angle: ph.angle || 0, name: 'Photo' });
-  img.clipPath = new Rect({ width: w / s, height: h / s, rx: rx / s, ry: rx / s, originX: 'center', originY: 'center' });
+  if (ph.frameShape && ph.type !== 'rect') {
+    const clip = createShape(ph.frameShape, 100);
+    clip.set({ originX: 'center', originY: 'center', left: 0, top: 0, strokeWidth: 0, scaleX: w / s / clip.width, scaleY: h / s / clip.height });
+    img.clipPath = clip;
+  } else {
+    img.clipPath = new Rect({ width: w / s, height: h / s, rx: rx / s, ry: rx / s, originX: 'center', originY: 'center' });
+  }
   const idx = c.getObjects().indexOf(ph);
   state.loading = true;
   c.remove(ph);
@@ -1256,6 +1266,7 @@ function bindTabs() {
         return;
       }
       state.tab = t.dataset.tab;
+      state.elView = null;
       $$('.tab').forEach((x) => x.classList.toggle('active', x === t));
       if (isMobile()) setPropsOpen(false);
       setPanelOpen(true);
@@ -1377,28 +1388,249 @@ function tabText(p) {
   );
 }
 
-function tabElements(p) {
+// ---------- Elements library ----------
+async function tabElements(p, view = state.elView) {
+  state.elView = view || null;
+  const back = `<button class="link-btn" id="elBack">${icon('chevLeft', 16)} Elements</button>`;
+  // --- Detail views
+  if (view?.section === '3d' || view?.section === 'flat') {
+    const kind = view.section;
+    const cat = view.cat || 'objects';
+    p.innerHTML = `${back}<h3>${kind === '3d' ? '3D graphics' : 'Illustrations'}</h3>
+      <div class="chips">${PACK_CATS.map(([k, l]) => `<button class="chip ${k === cat ? 'on' : ''}" data-pc="${k}">${l}</button>`).join('')}</div>
+      <div class="lib-grid ${kind}" id="packGrid"><p class="muted">Loading…</p></div>`;
+    $('#elBack', p).onclick = () => tabElements(p, null);
+    $$('[data-pc]', p).forEach((b) => (b.onclick = () => tabElements(p, { section: kind, cat: b.dataset.pc })));
+    try {
+      const items = await loadPack(kind, cat);
+      if (!$('#packGrid', p)) return;
+      $('#packGrid', p).innerHTML = items.map((it, i) => `<button class="lib-item" data-pi="${i}" title="${esc(it.n)}"><img loading="lazy" src="${kind === '3d' ? it.d : flatSrc(it.s)}" alt="${esc(it.n)}"></button>`).join('');
+      $$('[data-pi]', p).forEach((b) => (b.onclick = () => addGraphic(kind, items[+b.dataset.pi])));
+    } catch {
+      $('#packGrid', p).innerHTML = '<p class="muted">Could not load graphics.</p>';
+    }
+    return;
+  }
+  if (view?.section === 'icons') {
+    p.innerHTML = `${back}<h3>Icons</h3><input class="search" id="icSearch" placeholder="Search 2,000+ icons…" value="${esc(view.q || '')}">
+      <div class="lib-grid icons" id="icGrid"><p class="muted">Loading…</p></div>`;
+    $('#elBack', p).onclick = () => tabElements(p, null);
+    const nodes = await loadIcons();
+    const render = () => {
+      const q = $('#icSearch', p).value.trim().toLowerCase();
+      const names = q ? Object.keys(nodes).filter((n) => n.includes(q)).slice(0, 240) : POPULAR_ICONS.filter((n) => nodes[n]).concat(Object.keys(nodes).slice(0, 180));
+      $('#icGrid', p).innerHTML = names.map((n) => `<button class="lib-item ic" data-ic="${n}" title="${n}">${iconSVG(nodes[n], 'currentColor').replace('width="24" height="24"', 'width="30" height="30"')}</button>`).join('') || '<p class="muted">No icons found.</p>';
+      $$('[data-ic]', p).forEach((b) => (b.onclick = () => addIconEl(b.dataset.ic)));
+    };
+    $('#icSearch', p).oninput = render;
+    render();
+    return;
+  }
+  if (view?.section === 'shapes') {
+    p.innerHTML = `${back}<h3>Shapes & lines</h3><div class="shape-grid">${SHAPES.map((s) => `<button class="shape-item" data-shape="${s.id}" title="${s.label}">${shapePreview(s.id)}<small>${s.label}</small></button>`).join('')}</div>`;
+    $('#elBack', p).onclick = () => tabElements(p, null);
+    $$('[data-shape]', p).forEach((b) => (b.onclick = () => addShape(b.dataset.shape)));
+    return;
+  }
+
+  // --- Overview
+  const row = (id, title, inner) => `<section class="lib-sec"><div class="lib-head"><h4>${title}</h4>${id ? `<button class="link-btn" data-see="${id}">See all</button>` : ''}</div><div class="lib-row">${inner}</div></section>`;
   p.innerHTML = `
     <h3>Elements</h3>
-    <input class="search" id="elSearch" placeholder="Search shapes & stickers…">
-    <h4>Shapes & lines</h4>
-    <div class="shape-grid">${SHAPES.map((s) => `<button class="shape-item" data-shape="${s.id}" title="${s.label}">${shapePreview(s.id)}<small>${s.label}</small></button>`).join('')}</div>
-    <h4>Photo placeholder</h4>
-    <button class="btn ghost block" id="addPh">${icon('image')} Add photo placeholder</button>
-    <h4>Frames <small class="muted">(select an image, then pick a frame)</small></h4>
-    <div class="shape-grid">
-      ${['none', 'circle', 'rounded', 'star', 'heart', 'hexagon'].map((f) => `<button class="shape-item" data-frame="${f}">${f === 'none' ? icon('x') : shapePreview(f)}<small>${f === 'none' ? 'No frame' : f}</small></button>`).join('')}
-    </div>
-    <h4>Stickers</h4>
-    <div class="sticker-grid">${STICKERS.map((s) => `<button class="sticker" data-st="${s}">${s}</button>`).join('')}</div>`;
+    <input class="search" id="elSearch" placeholder="Search graphics, icons, shapes…">
+    <div id="elResults"></div>
+    <div id="elOverview">
+      ${row('shapes', 'Shapes', SHAPES.slice(0, 10).map((s) => `<button class="shape-item" data-shape="${s.id}" title="${s.label}">${shapePreview(s.id)}</button>`).join(''))}
+      ${row('3d', '3D graphics', '<span class="muted">Loading…</span>').replace('class="lib-row"', 'class="lib-row" id="row3d"')}
+      ${row('flat', 'Illustrations', '<span class="muted">Loading…</span>').replace('class="lib-row"', 'class="lib-row" id="rowFlat"')}
+      ${row('icons', 'Icons', '<span class="muted">Loading…</span>').replace('class="lib-row"', 'class="lib-row" id="rowIcons"')}
+      ${row('', 'Photo frames', FRAMES.map((f) => `<button class="shape-item frame" data-frame2="${f}" title="${f}">${framePreview(f)}</button>`).join(''))}
+      ${row('', 'Photo grids', GRIDS.map((g, i) => `<button class="shape-item grid" data-grid="${i}" title="${g.label}">${gridPreview(g)}</button>`).join(''))}
+      ${row('', 'Charts', CHART_PRESETS.map((c, i) => `<button class="chart-item" data-chart="${i}" title="${c.label}">${chartPreview(c.type)}<small>${c.label}</small></button>`).join(''))}
+      ${row('', 'Tables', TABLE_PRESETS.map((t, i) => `<button class="chart-item" data-table="${i}">${tablePreview(t)}<small>${t.label}</small></button>`).join(''))}
+      ${row('', 'Gradients', GRADIENT_ELEMENTS.map((g, i) => `<button class="shape-item" data-gel="${i}">${gradientPreview(g)}</button>`).join(''))}
+      ${row('', 'Stickers', STICKERS.slice(0, 24).map((s) => `<button class="sticker" data-st="${s}">${s}</button>`).join(''))}
+    </div>`;
+  $$('[data-see]', p).forEach((b) => (b.onclick = () => tabElements(p, { section: b.dataset.see })));
   $$('[data-shape]', p).forEach((b) => (b.onclick = () => addShape(b.dataset.shape)));
-  $('#addPh', p).onclick = addPhotoPlaceholder;
+  $$('[data-frame2]', p).forEach((b) => (b.onclick = () => addFrameEl(b.dataset.frame2)));
+  $$('[data-grid]', p).forEach((b) => (b.onclick = () => addGridEl(+b.dataset.grid)));
+  $$('[data-chart]', p).forEach((b) => (b.onclick = () => addChartEl(CHART_PRESETS[+b.dataset.chart])));
+  $$('[data-table]', p).forEach((b) => (b.onclick = () => addTableEl(TABLE_PRESETS[+b.dataset.table])));
+  $$('[data-gel]', p).forEach((b) => (b.onclick = () => addGradientEl(GRADIENT_ELEMENTS[+b.dataset.gel])));
   $$('[data-st]', p).forEach((b) => (b.onclick = () => addSticker(b.dataset.st)));
-  $$('[data-frame]', p).forEach((b) => (b.onclick = () => applyFrame(b.dataset.frame)));
-  $('#elSearch').oninput = (e) => {
-    const q = e.target.value.toLowerCase();
-    $$('.shape-item', p).forEach((b) => (b.style.display = b.textContent.toLowerCase().includes(q) ? '' : 'none'));
+
+  // Search across graphics + icons + shapes
+  $('#elSearch', p).oninput = debounce(async (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    const res = $('#elResults', p);
+    $('#elOverview', p).hidden = !!q;
+    if (q.length < 2) return (res.innerHTML = '');
+    res.innerHTML = '<p class="muted">Searching…</p>';
+    const [nodes, ...packs] = await Promise.all([
+      loadIcons(),
+      ...PACK_CATS.map(([k]) => loadPack('3d', k).catch(() => [])),
+      ...PACK_CATS.map(([k]) => loadPack('flat', k).catch(() => [])),
+    ]);
+    if ($('#elSearch', p)?.value.trim().toLowerCase() !== q) return;
+    const g3 = packs.slice(0, PACK_CATS.length).flat().filter((it) => it.n.includes(q)).slice(0, 40);
+    const gf = packs.slice(PACK_CATS.length).flat().filter((it) => it.n.includes(q)).slice(0, 40);
+    const ics = Object.keys(nodes).filter((n) => n.includes(q)).slice(0, 40);
+    const shp = SHAPES.filter((s) => s.label.toLowerCase().includes(q));
+    res.innerHTML =
+      (shp.length ? `<h4>Shapes</h4><div class="shape-grid">${shp.map((s) => `<button class="shape-item" data-shape="${s.id}">${shapePreview(s.id)}<small>${s.label}</small></button>`).join('')}</div>` : '') +
+      (g3.length ? `<h4>3D graphics</h4><div class="lib-grid 3d">${g3.map((it, i) => `<button class="lib-item" data-s3="${i}" title="${esc(it.n)}"><img src="${it.d}" alt=""></button>`).join('')}</div>` : '') +
+      (gf.length ? `<h4>Illustrations</h4><div class="lib-grid flat">${gf.map((it, i) => `<button class="lib-item" data-sf="${i}" title="${esc(it.n)}"><img src="${flatSrc(it.s)}" alt=""></button>`).join('')}</div>` : '') +
+      (ics.length ? `<h4>Icons</h4><div class="lib-grid icons">${ics.map((n) => `<button class="lib-item ic" data-ic="${n}" title="${n}">${iconSVG(nodes[n], 'currentColor').replace('width="24" height="24"', 'width="30" height="30"')}</button>`).join('')}</div>` : '') ||
+      `<p class="muted">Nothing found for “${esc(q)}”.</p>`;
+    $$('[data-shape]', res).forEach((b) => (b.onclick = () => addShape(b.dataset.shape)));
+    $$('[data-s3]', res).forEach((b) => (b.onclick = () => addGraphic('3d', g3[+b.dataset.s3])));
+    $$('[data-sf]', res).forEach((b) => (b.onclick = () => addGraphic('flat', gf[+b.dataset.sf])));
+    $$('[data-ic]', res).forEach((b) => (b.onclick = () => addIconEl(b.dataset.ic)));
+  }, 250);
+
+  // Fill the preview rows
+  loadPack('3d', 'objects').then((items) => {
+    const r = $('#row3d', p);
+    if (!r) return;
+    const pick = items.slice(0, 14);
+    r.innerHTML = pick.map((it, i) => `<button class="lib-item" data-r3="${i}" title="${esc(it.n)}"><img src="${it.d}" alt=""></button>`).join('');
+    $$('[data-r3]', r).forEach((b) => (b.onclick = () => addGraphic('3d', pick[+b.dataset.r3])));
+  }).catch(() => ($('#row3d', p).innerHTML = '<span class="muted">Unavailable</span>'));
+  loadPack('flat', 'nature').then((items) => {
+    const r = $('#rowFlat', p);
+    if (!r) return;
+    const pick = items.slice(0, 14);
+    r.innerHTML = pick.map((it, i) => `<button class="lib-item" data-rf="${i}" title="${esc(it.n)}"><img src="${flatSrc(it.s)}" alt=""></button>`).join('');
+    $$('[data-rf]', r).forEach((b) => (b.onclick = () => addGraphic('flat', pick[+b.dataset.rf])));
+  }).catch(() => ($('#rowFlat', p).innerHTML = '<span class="muted">Unavailable</span>'));
+  loadIcons().then((nodes) => {
+    const r = $('#rowIcons', p);
+    if (!r) return;
+    r.innerHTML = POPULAR_ICONS.slice(0, 16).filter((n) => nodes[n]).map((n) => `<button class="lib-item ic" data-ic="${n}" title="${n}">${iconSVG(nodes[n], 'currentColor').replace('width="24" height="24"', 'width="28" height="28"')}</button>`).join('');
+    $$('[data-ic]', r).forEach((b) => (b.onclick = () => addIconEl(b.dataset.ic)));
+  }).catch(() => ($('#rowIcons', p).innerHTML = '<span class="muted">Unavailable</span>'));
+}
+
+function debounce(fn, ms) {
+  let t;
+  return (...a) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...a), ms);
   };
+}
+
+function framePreview(f) {
+  if (f === 'polaroid') return `<svg viewBox="0 0 40 40" width="44" height="44"><rect x="8" y="4" width="24" height="32" fill="#fff" stroke="#d4d4d8"/><rect x="10" y="6" width="20" height="21" fill="currentColor" opacity=".7"/></svg>`;
+  if (f === 'phone') return `<svg viewBox="0 0 40 40" width="44" height="44"><rect x="12" y="2" width="16" height="36" rx="3" fill="#111827"/><rect x="13.5" y="4" width="13" height="32" rx="2" fill="currentColor" opacity=".7"/></svg>`;
+  if (f === 'arch') return `<svg viewBox="0 0 40 40" width="44" height="44"><path d="M6 38V18a14 14 0 0 1 28 0v20z" fill="currentColor" opacity=".75"/></svg>`;
+  return shapePreview(f).replace('fill="currentColor"', 'fill="currentColor" opacity=".75"');
+}
+function chartPreview(type) {
+  const c = '#7c3aed';
+  const P = {
+    bar: `<rect x="4" y="22" width="6" height="14" fill="${c}"/><rect x="13" y="12" width="6" height="24" fill="#ec4899"/><rect x="22" y="18" width="6" height="18" fill="#f59e0b"/><rect x="31" y="6" width="6" height="30" fill="#10b981"/>`,
+    hbar: `<rect x="4" y="5" width="30" height="6" rx="3" fill="${c}"/><rect x="4" y="14" width="22" height="6" rx="3" fill="#ec4899"/><rect x="4" y="23" width="15" height="6" rx="3" fill="#f59e0b"/><rect x="4" y="32" width="9" height="5" rx="2.5" fill="#10b981"/>`,
+    line: `<path d="M3 32 L12 20 L20 25 L28 12 L37 8" fill="none" stroke="${c}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>`,
+    donut: `<circle cx="20" cy="20" r="13" fill="none" stroke="${c}" stroke-width="7" stroke-dasharray="40 82"/><circle cx="20" cy="20" r="13" fill="none" stroke="#ec4899" stroke-width="7" stroke-dasharray="25 82" stroke-dashoffset="-40"/><circle cx="20" cy="20" r="13" fill="none" stroke="#f59e0b" stroke-width="7" stroke-dasharray="17 82" stroke-dashoffset="-65"/>`,
+    pie: `<path d="M20 20 L20 4 A16 16 0 0 1 35 25 Z" fill="${c}"/><path d="M20 20 L35 25 A16 16 0 0 1 8 31 Z" fill="#ec4899"/><path d="M20 20 L8 31 A16 16 0 0 1 20 4 Z" fill="#f59e0b"/>`,
+    progress: `<circle cx="20" cy="20" r="14" fill="none" stroke="#e5e7eb" stroke-width="5"/><circle cx="20" cy="20" r="14" fill="none" stroke="${c}" stroke-width="5" stroke-dasharray="63 88" transform="rotate(-90 20 20)"/>`,
+  };
+  return `<svg viewBox="0 0 40 40" width="56" height="56">${P[type]}</svg>`;
+}
+function tablePreview(t) {
+  const cols = t.rows[0].length;
+  const cw = 36 / cols;
+  let s = '';
+  for (let r = 0; r < 5; r++) for (let c = 0; c < cols; c++) s += `<rect x="${2 + c * cw}" y="${4 + r * 6.5}" width="${cw}" height="6.5" fill="${r === 0 ? t.color : r % 2 ? '#fff' : '#f1f5f9'}" stroke="#e2e8f0" stroke-width=".5"/>`;
+  return `<svg viewBox="0 0 40 40" width="56" height="56">${s}</svg>`;
+}
+
+async function addGraphic(kind, item) {
+  const src = kind === '3d' ? item.d : flatSrc(item.s);
+  const img = await FabricImage.fromURL(src);
+  const size = minSide() * 0.35;
+  img.scaleToWidth(size);
+  img.set({ name: item.n.replace(/^\w/, (c) => c.toUpperCase()) });
+  return place(img);
+}
+
+async function addIconEl(name) {
+  const nodes = await loadIcons();
+  if (!nodes[name]) return;
+  const g = await createIcon(name, nodes[name], minSide() * 0.2, '#111827');
+  return place(g);
+}
+
+function addFrameEl(kind) {
+  const size = minSide() * 0.45;
+  const f = buildFrame(kind, size);
+  if (Array.isArray(f)) {
+    const { width: W, height: H } = state.design;
+    state.loading = true;
+    f.forEach((o) => {
+      o.set({ left: W / 2 + (o.left || 0), top: H / 2 + (o.top || 0) });
+      if (o.name === 'Polaroid card') o.set({ shadow: new Shadow({ color: 'rgba(0,0,0,0.18)', blur: size * 0.06, offsetY: size * 0.02 }) });
+      o.setCoords();
+      state.canvas.add(o);
+    });
+    state.loading = false;
+    state.canvas.setActiveObject(f[1]);
+    state.canvas.requestRenderAll();
+    pushHistory();
+    schedulePersist();
+    renderProps();
+    if (isMobile()) setPanelOpen(false);
+    return;
+  }
+  return place(f);
+}
+
+function addGridEl(i) {
+  const { width: W, height: H } = state.design;
+  const gap = minSide() * 0.015;
+  const cells = buildGrid(GRIDS[i], W, H, gap);
+  state.loading = true;
+  cells.forEach((o) => state.canvas.add(o));
+  state.loading = false;
+  state.canvas.setActiveObject(cells[0]);
+  state.canvas.requestRenderAll();
+  pushHistory();
+  schedulePersist();
+  renderProps();
+  if (isMobile()) setPanelOpen(false);
+  toast('Select a frame, then upload or pick a photo to fill it');
+}
+
+function addChartEl(spec) {
+  return place(buildChart({ ...spec }, minSide() * 0.6));
+}
+function addTableEl(spec) {
+  return place(buildTable({ ...spec, rows: spec.rows.map((r) => [...r]) }, minSide() * 0.7));
+}
+function addGradientEl(g) {
+  return place(buildGradientElement(g, minSide() * 0.45));
+}
+
+/** Rebuild a chart or table in place after its data changed. */
+function rebuildDataObject(o, build) {
+  const c = state.canvas;
+  const idx = c.getObjects().indexOf(o);
+  const center = o.getCenterPoint();
+  const { scaleX, scaleY, angle } = o;
+  const g = build();
+  g.set({ scaleX: scaleX * (o.width / g.width), scaleY: scaleY * (o.width / g.width), angle, originX: 'center', originY: 'center' });
+  g.setPositionByOrigin(center, 'center', 'center');
+  state.loading = true;
+  c.remove(o);
+  c.insertAt(idx, g);
+  state.loading = false;
+  g.setCoords();
+  c.setActiveObject(g);
+  c.requestRenderAll();
+  pushHistory();
+  schedulePersist();
+  renderProps();
 }
 
 function shapePreview(id) {
@@ -1422,6 +1654,7 @@ function shapePreview(id) {
     dashed: '<path d="M4 20h32" stroke="currentColor" stroke-width="3" stroke-dasharray="5 4" stroke-linecap="round"/>',
     arrowline: '<path d="M4 20h31M28 13l7 7-7 7" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
   };
+  P.arch = '<path d="M6 38V18a14 14 0 0 1 28 0v20z"/>';
   return `<svg viewBox="0 0 40 40" width="40" height="40" fill="currentColor">${P[id] || P.rect}</svg>`;
 }
 
@@ -1669,6 +1902,12 @@ function setProp(key, value, { record = true } = {}) {
   const c = state.canvas;
   const objs = c.getActiveObjects();
   objs.forEach((o) => {
+    if (o.kind === 'icon' && (key === 'fill' || key === 'stroke')) {
+      (o.getObjects ? o.getObjects() : [o]).forEach((ch) => ch.set('stroke', value));
+      o.dirty = true;
+      return;
+    }
+    if ((o.chart || o.table) && (key === 'fill' || key === 'stroke')) return;
     if (o.type === 'group' && (key === 'fill' || key === 'stroke')) {
       o.getObjects().forEach((ch) => ch.set(key, value));
     }
@@ -1754,8 +1993,9 @@ function renderProps() {
       <p class="muted">Upload a photo, or click any image in Uploads, Photos or Brand Kit logos to fill this frame.</p>
       <button class="btn primary block" id="phUpload">${icon('upload')} Upload photo</button>
       <button class="btn ghost block" id="phPhotos">${icon('image')} Choose from Photos</button></div>` : ''}
-    ${!text && !img ? `
-    <div class="field"><label>${o.type === 'line' ? 'Line color' : 'Fill'}</label>${colorPicker('pFill', o.type === 'line' || (o.type === 'path' && !o.fill) ? o.stroke : fill)}</div>
+    ${dataPropsHTML(o)}
+    ${!text && !img && !o.chart && !o.table ? `
+    <div class="field"><label>${o.kind === 'icon' ? 'Icon color' : o.type === 'line' ? 'Line color' : 'Fill'}</label>${colorPicker('pFill', o.type === 'line' || (o.type === 'path' && !o.fill) ? o.stroke : fill)}</div>
     ${!multi && o.type !== 'line' && o.type !== 'group' ? `<div class="field"><label>Gradient fill</label><div class="grad-grid small">${GRADIENTS.slice(0, 8).map((g, i) => `<button class="grad" data-og="${i}" style="background:linear-gradient(135deg,${g[0]},${g[1]})"></button>`).join('')}</div></div>` : ''}
     <div class="field"><label>Border</label><div class="row"><input type="color" id="pStroke" value="${toHex(o.stroke || '#000000')}"><input type="range" min="0" max="60" step="1" value="${o.strokeWidth || 0}" id="pSW"></div>
       <div class="seg mt"><button data-dash="solid" class="${!o.strokeDashArray ? 'on' : ''}">Solid</button><button data-dash="dash" class="${o.strokeDashArray ? 'on' : ''}">Dashed</button></div></div>
@@ -1891,6 +2131,7 @@ function bindProps(o, text, img) {
   };
   const commit = () => { pushHistory(); schedulePersist(); };
 
+  bindDataProps(o);
   // photo placeholder
   on('phUpload', 'onclick', () => {
     const inp = document.createElement('input');
@@ -2855,6 +3096,57 @@ function showSaveFallback(url, filename) {
 }
 
 // =====================================================
+// CHART / TABLE DATA EDITING
+// =====================================================
+function dataPropsHTML(o) {
+  if (o.chart) {
+    const ch = o.chart;
+    const multi = ch.type === 'donut' || ch.type === 'pie';
+    return `<h4>Chart data</h4>
+      <div class="field"><label>Type</label><select id="chType">${CHART_PRESETS.map((c) => `<option value="${c.type}" ${c.type === ch.type ? 'selected' : ''}>${c.label}</option>`).join('')}</select></div>
+      <label class="flabel">Labels (comma separated)<input class="search" id="chLabels" value="${esc(ch.labels.join(', '))}"></label>
+      <label class="flabel">Values (comma separated)<input class="search" id="chValues" value="${esc(ch.values.join(', '))}"></label>
+      ${multi ? '' : `<div class="field"><label>Color</label><div class="row"><input type="color" id="chColor" value="${toHex(ch.color || '#7c3aed')}"><button class="btn ghost small" id="chMulti">Multi-color</button></div></div>`}
+      <div class="field"><label>Text color</label><input type="color" id="chText" value="${toHex(ch.text || '#374151')}"></div>
+      <button class="btn primary block" id="chApply">Update chart</button>`;
+  }
+  if (o.table) {
+    return `<h4>Table data</h4>
+      <label class="flabel">One row per line, separate cells with |<textarea class="search table-edit" id="tbRows" rows="6">${esc(o.table.rows.map((r) => r.join(' | ')).join('\n'))}</textarea></label>
+      <div class="field"><label>Header color</label><input type="color" id="tbColor" value="${toHex(o.table.color)}"></div>
+      <button class="btn primary block" id="tbApply">Update table</button>`;
+  }
+  return '';
+}
+function bindDataProps(o) {
+  if (o.chart) {
+    const read = (color) => ({
+      type: $('#chType').value,
+      labels: $('#chLabels').value.split(',').map((x) => x.trim()),
+      values: $('#chValues').value.split(',').map((x) => x.trim()).filter((x) => x !== ''),
+      color: color !== undefined ? color : $('#chColor')?.value ?? o.chart.color,
+      text: $('#chText').value,
+    });
+    const apply = (color) => rebuildDataObject(o, () => buildChart(read(color), o.width));
+    $('#chApply').onclick = () => apply();
+    $('#chType').onchange = () => apply();
+    const m = $('#chMulti');
+    if (m) m.onclick = () => apply('');
+    const cc = $('#chColor');
+    if (cc) cc.onchange = () => apply();
+    $('#chText').onchange = () => apply();
+  }
+  if (o.table) {
+    const apply = () =>
+      rebuildDataObject(o, () =>
+        buildTable({ rows: $('#tbRows').value.split('\n').filter((l) => l.trim()).map((l) => l.split('|').map((c) => c.trim())), color: $('#tbColor').value }, o.width)
+      );
+    $('#tbApply').onclick = apply;
+    $('#tbColor').onchange = apply;
+  }
+}
+
+// =====================================================
 // PANELS / RESPONSIVE LAYOUT
 // =====================================================
 const isMobile = () => window.matchMedia('(max-width: 760px)').matches;
@@ -2900,4 +3192,4 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && sta
 boot();
 
 // expose a tiny API for debugging/testing
-window.artvas = { state, addText, addShape, addImage, exportDesign, util, templateThumb, TEMPLATES, FORMATS };
+window.artvas = { loadPack, state, addText, addShape, addImage, exportDesign, util, templateThumb, TEMPLATES, FORMATS };
