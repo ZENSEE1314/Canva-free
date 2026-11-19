@@ -192,3 +192,194 @@ export const TEMPLATES = [
     ],
   },
 ];
+
+// ---- Extra templates ----
+TEMPLATES.push(
+  {
+    name: 'Coffee Shop',
+    cat: 'Food',
+    bg: { color: '#3b2a20' },
+    items: [
+      { t: 'circle', x: 0.5, y: 0.42, r: 0.3, fill: '#d6b48c' },
+      { t: 'emoji', text: '☕', x: 0.5, y: 0.42, size: 0.25 },
+      { t: 'text', text: 'Morning Brew', x: 0.5, y: 0.8, size: 0.09, font: 'Lobster', fill: '#f5e6d3' },
+      { t: 'text', text: 'FRESHLY ROASTED · EVERY DAY', x: 0.5, y: 0.9, size: 0.03, font: 'Montserrat', weight: '700', fill: '#d6b48c', charSpacing: 250 },
+    ],
+  },
+  {
+    name: 'Fitness Challenge',
+    cat: 'Social',
+    bg: { gradient: ['#111827', '#7f1d1d'], angle: 90 },
+    items: [
+      { t: 'text', text: '30 DAY', x: 0.5, y: 0.25, size: 0.1, font: 'Bebas Neue', fill: '#f87171', charSpacing: 200 },
+      { t: 'text', text: 'FITNESS\nCHALLENGE', x: 0.5, y: 0.45, w: 0.9, size: 0.15, font: 'Anton', fill: '#ffffff' },
+      { t: 'rect', x: 0.5, y: 0.7, w: 0.5, h: 0.006, fill: '#f87171' },
+      { t: 'text', text: 'Join us · Starts Monday', x: 0.5, y: 0.78, size: 0.04, font: 'Oswald', fill: '#fecaca' },
+      { t: 'emoji', text: '💪', x: 0.85, y: 0.88, size: 0.1 },
+    ],
+  },
+  {
+    name: 'Real Estate',
+    cat: 'Business',
+    bg: { color: '#f8fafc' },
+    items: [
+      { t: 'rect', x: 0.5, y: 0.3, w: 1, h: 0.6, fill: '#cbd5e1' },
+      { t: 'emoji', text: '🏡', x: 0.5, y: 0.3, size: 0.28 },
+      { t: 'rect', x: 0.5, y: 0.6, w: 0.5, h: 0.08, fill: '#0f766e' },
+      { t: 'text', text: 'JUST LISTED', x: 0.5, y: 0.6, size: 0.04, font: 'Montserrat', weight: '900', fill: '#fff', charSpacing: 300 },
+      { t: 'text', text: '3 bed · 2 bath · Garden', x: 0.5, y: 0.75, size: 0.045, font: 'Poppins', weight: '600', fill: '#0f172a' },
+      { t: 'text', text: 'Call 555-0100 for a viewing', x: 0.5, y: 0.84, size: 0.03, font: 'Poppins', fill: '#475569' },
+    ],
+  },
+  {
+    name: 'Motivation',
+    cat: 'Quote',
+    bg: { gradient: ['#30cfd0', '#330867'] },
+    items: [
+      { t: 'text', text: 'Dream big.\nStart small.\nAct now.', x: 0.5, y: 0.47, w: 0.85, size: 0.1, font: 'Poppins', weight: '800', fill: '#ffffff' },
+      { t: 'text', text: '@yourhandle', x: 0.5, y: 0.88, size: 0.03, font: 'Poppins', fill: '#cffafe' },
+    ],
+  },
+  {
+    name: 'Black Friday',
+    cat: 'Sale',
+    bg: { color: '#000000' },
+    items: [
+      { t: 'text', text: 'BLACK', x: 0.5, y: 0.3, size: 0.2, font: 'Archivo Black', fill: '#ffffff' },
+      { t: 'text', text: 'FRIDAY', x: 0.5, y: 0.48, size: 0.2, font: 'Archivo Black', fill: 'transparent', stroke: '#facc15', strokeW: 0.005 },
+      { t: 'shape', shape: 'burst', x: 0.5, y: 0.75, s: 0.3, fill: '#facc15' },
+      { t: 'text', text: '-50%', x: 0.5, y: 0.75, size: 0.08, font: 'Anton', fill: '#000000' },
+    ],
+  },
+  {
+    name: 'Thank You Card',
+    cat: 'Cards',
+    bg: { color: '#fdf2f8' },
+    items: [
+      { t: 'shape', shape: 'heart', x: 0.5, y: 0.3, s: 0.22, fill: '#f472b6' },
+      { t: 'text', text: 'Thank You', x: 0.5, y: 0.55, size: 0.13, font: 'Great Vibes', fill: '#9d174d' },
+      { t: 'text', text: 'for being part of our journey', x: 0.5, y: 0.68, size: 0.035, font: 'Lora', style: 'italic', fill: '#831843' },
+    ],
+  },
+  {
+    name: 'Podcast Cover',
+    cat: 'Social',
+    bg: { gradient: ['#a855f7', '#ec4899'] },
+    items: [
+      { t: 'circle', x: 0.5, y: 0.38, r: 0.22, fill: '#1e1b4b' },
+      { t: 'emoji', text: '🎧', x: 0.5, y: 0.38, size: 0.2 },
+      { t: 'text', text: 'THE DAILY\nCREATIVE', x: 0.5, y: 0.75, w: 0.9, size: 0.1, font: 'Space Grotesk', weight: '700', fill: '#ffffff' },
+      { t: 'text', text: 'PODCAST', x: 0.5, y: 0.91, size: 0.035, font: 'Space Grotesk', weight: '700', fill: '#fce7f3', charSpacing: 600 },
+    ],
+  },
+  {
+    name: 'Webinar',
+    cat: 'Business',
+    bg: { color: '#eef2ff' },
+    items: [
+      { t: 'rect', x: 0.08, y: 0.5, w: 0.03, h: 0.6, fill: '#4f46e5' },
+      { t: 'text', text: 'FREE WEBINAR', x: 0.5, y: 0.25, w: 0.8, size: 0.04, font: 'Inter', weight: '800', fill: '#4f46e5', align: 'left', charSpacing: 300 },
+      { t: 'text', text: 'How to Grow Your Audience in 2027', x: 0.5, y: 0.45, w: 0.8, size: 0.08, font: 'Inter', weight: '800', fill: '#1e1b4b', align: 'left' },
+      { t: 'text', text: 'Thursday · 6 PM · Online', x: 0.5, y: 0.65, w: 0.8, size: 0.035, font: 'Inter', fill: '#4338ca', align: 'left' },
+      { t: 'rect', x: 0.3, y: 0.8, w: 0.36, h: 0.08, fill: '#4f46e5', rx: 0.02 },
+      { t: 'text', text: 'Save your seat', x: 0.3, y: 0.8, size: 0.03, font: 'Inter', weight: '700', fill: '#fff' },
+    ],
+  },
+  {
+    name: 'Travel',
+    cat: 'Social',
+    bg: { gradient: ['#0ea5e9', '#fde68a'], angle: 90 },
+    items: [
+      { t: 'circle', x: 0.75, y: 0.25, r: 0.12, fill: '#fef08a' },
+      { t: 'emoji', text: '🌴', x: 0.2, y: 0.7, size: 0.3 },
+      { t: 'text', text: 'Explore', x: 0.55, y: 0.48, size: 0.14, font: 'Pacifico', fill: '#ffffff' },
+      { t: 'text', text: 'THE WORLD', x: 0.55, y: 0.62, size: 0.06, font: 'Montserrat', weight: '900', fill: '#0c4a6e', charSpacing: 400 },
+    ],
+  },
+  {
+    name: 'Hiring',
+    cat: 'Business',
+    bg: { color: '#fef3c7' },
+    items: [
+      { t: 'text', text: "WE'RE", x: 0.5, y: 0.2, size: 0.07, font: 'Archivo Black', fill: '#92400e' },
+      { t: 'text', text: 'HIRING!', x: 0.5, y: 0.35, size: 0.18, font: 'Archivo Black', fill: '#111827' },
+      { t: 'rect', x: 0.5, y: 0.58, w: 0.7, h: 0.18, fill: '#ffffff', rx: 0.02 },
+      { t: 'text', text: 'Designer · Developer · Marketer', x: 0.5, y: 0.58, w: 0.65, size: 0.04, font: 'Poppins', weight: '600', fill: '#111827' },
+      { t: 'text', text: 'Apply at yourcompany.com/jobs', x: 0.5, y: 0.82, size: 0.035, font: 'Poppins', fill: '#92400e' },
+    ],
+  },
+  {
+    name: 'Menu Board',
+    cat: 'Food',
+    bg: { color: '#1f2937' },
+    items: [
+      { t: 'text', text: 'Menu', x: 0.5, y: 0.13, size: 0.11, font: 'Dancing Script', weight: '700', fill: '#fbbf24' },
+      { t: 'text', text: 'Margherita Pizza ........ $12\nPasta Carbonara ......... $14\nCaesar Salad .............. $9\nTiramisu .................... $7', x: 0.5, y: 0.5, w: 0.82, size: 0.042, font: 'Josefin Sans', fill: '#f9fafb', align: 'left' },
+      { t: 'text', text: 'Open daily 11am – 10pm', x: 0.5, y: 0.88, size: 0.03, font: 'Josefin Sans', fill: '#9ca3af' },
+    ],
+  },
+  {
+    name: 'Christmas',
+    cat: 'Holiday',
+    bg: { gradient: ['#14532d', '#166534'] },
+    items: [
+      { t: 'emoji', text: '🎄', x: 0.5, y: 0.3, size: 0.25 },
+      { t: 'emoji', text: '❄️', x: 0.15, y: 0.15, size: 0.07 },
+      { t: 'emoji', text: '❄️', x: 0.85, y: 0.2, size: 0.06 },
+      { t: 'text', text: 'Merry Christmas', x: 0.5, y: 0.62, w: 0.9, size: 0.1, font: 'Great Vibes', fill: '#fde68a' },
+      { t: 'text', text: 'AND A HAPPY NEW YEAR', x: 0.5, y: 0.75, size: 0.03, font: 'Montserrat', weight: '700', fill: '#dcfce7', charSpacing: 300 },
+    ],
+  },
+  {
+    name: 'New Year',
+    cat: 'Holiday',
+    bg: { gradient: ['#0f172a', '#4c1d95'] },
+    items: [
+      { t: 'emoji', text: '🎆', x: 0.2, y: 0.2, size: 0.15 },
+      { t: 'emoji', text: '✨', x: 0.82, y: 0.25, size: 0.1 },
+      { t: 'text', text: 'HAPPY NEW YEAR', x: 0.5, y: 0.45, size: 0.06, font: 'Montserrat', weight: '900', fill: '#e9d5ff', charSpacing: 400 },
+      { t: 'text', text: '2027', x: 0.5, y: 0.62, size: 0.22, font: 'Abril Fatface', fill: '#fbbf24' },
+    ],
+  },
+  {
+    name: 'Product Launch',
+    cat: 'Sale',
+    bg: { color: '#ffffff' },
+    items: [
+      { t: 'shape', shape: 'blob', x: 0.68, y: 0.45, s: 0.6, fill: '#c7d2fe' },
+      { t: 'emoji', text: '🚀', x: 0.68, y: 0.45, size: 0.25 },
+      { t: 'text', text: 'Now\navailable', x: 0.3, y: 0.4, w: 0.5, size: 0.1, font: 'DM Serif Display', fill: '#1e1b4b', align: 'left' },
+      { t: 'text', text: 'Meet the all-new version. Faster, simpler, better.', x: 0.3, y: 0.62, w: 0.5, size: 0.032, font: 'Inter', fill: '#475569', align: 'left' },
+      { t: 'rect', x: 0.22, y: 0.82, w: 0.34, h: 0.08, fill: '#4f46e5', rx: 0.04 },
+      { t: 'text', text: 'Learn more', x: 0.22, y: 0.82, size: 0.032, font: 'Inter', weight: '700', fill: '#fff' },
+    ],
+  },
+  {
+    name: 'Business Card',
+    cat: 'Cards',
+    bg: { color: '#0f172a' },
+    items: [
+      { t: 'rect', x: 0.06, y: 0.5, w: 0.02, h: 1, fill: '#f59e0b' },
+      { t: 'text', text: 'Alex Morgan', x: 0.5, y: 0.35, w: 0.8, size: 0.11, font: 'Playfair Display', weight: 'bold', fill: '#ffffff', align: 'left' },
+      { t: 'text', text: 'CREATIVE DIRECTOR', x: 0.5, y: 0.5, w: 0.8, size: 0.04, font: 'Montserrat', weight: '700', fill: '#f59e0b', align: 'left', charSpacing: 300 },
+      { t: 'text', text: 'alex@example.com\n+1 555 0100', x: 0.5, y: 0.75, w: 0.8, size: 0.045, font: 'Inter', fill: '#cbd5e1', align: 'left' },
+    ],
+  },
+  {
+    name: 'Halloween',
+    cat: 'Holiday',
+    bg: { gradient: ['#1c1917', '#7c2d12'] },
+    items: [
+      { t: 'emoji', text: '🎃', x: 0.5, y: 0.32, size: 0.28 },
+      { t: 'text', text: 'Spooky Night', x: 0.5, y: 0.62, size: 0.1, font: 'Permanent Marker', fill: '#fb923c' },
+      { t: 'text', text: 'COSTUME PARTY · OCT 31', x: 0.5, y: 0.74, size: 0.035, font: 'Oswald', weight: '700', fill: '#fed7aa', charSpacing: 200 },
+    ],
+  }
+);
+
+const DEFAULT_CATS = {
+  'Bold Sale': 'Sale', 'Minimal Quote': 'Quote', 'Event Poster': 'Event', Birthday: 'Cards', 'Business Pitch': 'Business',
+  'Fresh Promo': 'Food', 'Dark Tech': 'Event', 'Wedding Invite': 'Cards', 'YouTube Hook': 'Social',
+};
+TEMPLATES.forEach((t) => { if (!t.cat) t.cat = DEFAULT_CATS[t.name] || 'Other'; });
+export const TEMPLATE_CATS = ['All', ...new Set(TEMPLATES.map((t) => t.cat))];

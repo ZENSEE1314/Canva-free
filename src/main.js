@@ -4,16 +4,18 @@ import {
   Circle, Rect, filters, cache, util, InteractiveFabricObject,
 } from 'fabric';
 import { jsPDF } from 'jspdf';
-import { saveDesign, getDesign, listDesigns, deleteDesign, uid } from './storage.js';
+import { saveDesign, getDesign, listDesigns, deleteDesign, uid, listVersions, saveVersion, getVersion, deleteVersion, kvGet, kvSet } from './storage.js';
 import {
-  SIZE_PRESETS, FONTS, PALETTE, GRADIENTS, TEXT_PRESETS, TEXT_COMBOS, SHAPES, STICKERS, TEMPLATES,
+  SIZE_PRESETS, FONTS, PALETTE, GRADIENTS, TEXT_PRESETS, TEXT_COMBOS, SHAPES, STICKERS, TEMPLATES, TEMPLATE_CATS,
 } from './data.js';
+import { removeBackgroundAI, removeColor } from './bgremove.js';
+import { ANIMATIONS, PAGE_PRESETS, playPreview, exportGIF, exportVideo, animationLength, videoMime } from './animate.js';
 import { createShape, makeGradient, buildTemplate } from './elements.js';
 import { icon } from './icons.js';
 
 const PROPS = [
   'name', 'locked', 'selectable', 'evented', 'hasControls', 'lockMovementX', 'lockMovementY',
-  'lockRotation', 'lockScalingX', 'lockScalingY', 'bgGradient',
+  'lockRotation', 'lockScalingX', 'lockScalingY', 'bgGradient', 'anim',
 ];
 
 const app = document.getElementById('app');
@@ -36,6 +38,9 @@ const state = {
   drawing: { on: false, color: '#7c3aed', width: 8, eraser: false },
   photosPage: 1,
   uploads: [],
+  tplCat: 'All',
+  brand: { colors: [], headingFont: 'Montserrat', bodyFont: 'Inter', logos: [], fonts: [] },
+  lastVersionAt: 0,
 };
 
 // ---------- Toast ----------
@@ -218,6 +223,7 @@ async function importDesignFile(file) {
 async function openEditor(design) {
   state.design = design;
   state.page = 0;
+  state.lastVersionAt = 0;
   history.replaceState(null, '', `/design/${design.id}`);
   app.innerHTML = editorHTML();
   bindTopbar();
@@ -255,6 +261,8 @@ function editorHTML() {
     ['photos', 'image', 'Photos'],
     ['draw', 'pen', 'Draw'],
     ['background', 'palette', 'Background'],
+    ['animate', 'play', 'Animate'],
+    ['brand', 'brand', 'Brand Kit'],
     ['layers', 'layers', 'Layers'],
   ];
   return `
@@ -266,6 +274,7 @@ function editorHTML() {
       <button class="icon-btn light" id="undo" title="Undo (Ctrl+Z)">${icon('undo')}</button>
       <button class="icon-btn light" id="redo" title="Redo (Ctrl+Y)">${icon('redo')}</button>
       <button class="tb-btn" id="resizeBtn">${icon('resize')} Resize</button>
+      <button class="tb-btn" id="historyBtn" title="Version history">${icon('clock')} History</button>
       <span class="save-status" id="saveStatus">Saved</span>
       <input class="title-input" id="title" value="${esc(d.name)}" spellcheck="false">
       <div class="spacer"></div>
@@ -280,6 +289,8 @@ function editorHTML() {
               <option value="jpg">JPG (small file)</option>
               <option value="pdf">PDF (all pages)</option>
               <option value="svg">SVG (vector)</option>
+              <option value="gif">GIF (animated)</option>
+              <option value="video">Video MP4/WebM (animated)</option>
               <option value="json">Artvas project (.json)</option>
             </select>
           </label>
@@ -374,6 +385,7 @@ function bindTopbar() {
     $('#exportMenu').hidden = true;
   };
   $('#resizeBtn').onclick = openResizeDialog;
+  $('#historyBtn').onclick = openHistoryDialog;
   $('#zoomIn').onclick = () => setZoom(state.zoom * 1.2);
   $('#zoomOut').onclick = () => setZoom(state.zoom / 1.2);
   $('#zoomFit').onclick = fitZoom;
@@ -458,9 +470,13 @@ function bindCanvasEvents() {
   });
   c.on('text:changed', () => schedulePersist());
   c.on('text:editing:exited', onChange);
-  c.on('selection:created', () => renderProps());
-  c.on('selection:updated', () => renderProps());
-  c.on('selection:cleared', () => renderProps());
+  const onSel = () => {
+    renderProps();
+    if (state.tab === 'animate') renderTab();
+  };
+  c.on('selection:created', onSel);
+  c.on('selection:updated', onSel);
+  c.on('selection:cleared', onSel);
 
   // Smart guides: snap to page center and edges
   let guides = [];
@@ -842,6 +858,7 @@ async function persist() {
     await saveDesign(state.design);
     const s = $('#saveStatus');
     if (s) s.textContent = 'Saved';
+    maybeAutoVersion();
   } catch (e) {
     console.error(e);
     const s = $('#saveStatus');
@@ -1108,7 +1125,7 @@ async function templateThumb(i, W, H, size) {
   const el = document.createElement('canvas');
   const sc = new StaticCanvas(el, { width: W, height: H, enableRetinaScaling: false, renderOnAddRemove: false });
   const tpl = TEMPLATES[i];
-  sc.backgroundColor = tpl.bg.gradient ? makeGradient(tpl.bg.gradient, W, H, 135) : tpl.bg.color;
+  sc.backgroundColor = tpl.bg.gradient ? makeGradient(tpl.bg.gradient, W, H, tpl.bg.angle ?? 135) : tpl.bg.color;
   buildTemplate(tpl, W, H).forEach((o) => sc.add(o));
   sc.renderAll();
   const url = sc.toDataURL({ format: 'jpeg', quality: 0.8, multiplier: size / W });
@@ -1141,19 +1158,39 @@ function renderTab() {
     state.canvas.isDrawingMode = false;
     state.drawing.on = false;
   }
-  const map = { templates: tabTemplates, text: tabText, elements: tabElements, uploads: tabUploads, photos: tabPhotos, draw: tabDraw, background: tabBackground, layers: tabLayers };
+  const map = { templates: tabTemplates, text: tabText, elements: tabElements, uploads: tabUploads, photos: tabPhotos, draw: tabDraw, background: tabBackground, animate: tabAnimate, brand: tabBrand, layers: tabLayers };
   map[state.tab]?.(p);
 }
 
 async function tabTemplates(p) {
-  p.innerHTML = `<h3>Templates</h3><p class="muted">Click to apply to the current page. Everything is editable.</p><div class="tpl-grid">${TEMPLATES.map(
-    (t, i) => `<button class="tpl-card" data-ti="${i}"><img data-tthumb="${i}" alt=""><span>${esc(t.name)}</span></button>`
-  ).join('')}</div>`;
+  p.innerHTML = `<h3>Templates</h3>
+    <input class="search" id="tplSearch" placeholder="Search ${TEMPLATES.length} templates…">
+    <div class="chips">${TEMPLATE_CATS.map((c) => `<button class="chip ${state.tplCat === c ? 'on' : ''}" data-cat="${c}">${c}</button>`).join('')}</div>
+    <div class="tpl-grid">${TEMPLATES.map(
+      (t, i) => `<button class="tpl-card" data-ti="${i}" data-name="${esc(t.name.toLowerCase())} ${t.cat.toLowerCase()}" data-tcat="${t.cat}"><img data-tthumb="${i}" alt=""><span>${esc(t.name)}</span></button>`
+    ).join('')}</div>`;
+  const filter = () => {
+    const q = $('#tplSearch', p).value.toLowerCase();
+    $$('[data-ti]', p).forEach((b) => {
+      const ok = (state.tplCat === 'All' || b.dataset.tcat === state.tplCat) && b.dataset.name.includes(q);
+      b.style.display = ok ? '' : 'none';
+    });
+  };
+  $('#tplSearch', p).oninput = filter;
+  $$('[data-cat]', p).forEach(
+    (b) =>
+      (b.onclick = () => {
+        state.tplCat = b.dataset.cat;
+        $$('[data-cat]', p).forEach((x) => x.classList.toggle('on', x === b));
+        filter();
+      })
+  );
+  filter();
   $$('[data-ti]', p).forEach((b) => (b.onclick = () => applyTemplate(+b.dataset.ti)));
   const { width: W, height: H } = state.design;
   for (let i = 0; i < TEMPLATES.length; i++) {
     const img = $(`[data-tthumb="${i}"]`, p);
-    if (!img) return;
+    if (!img || !img.isConnected) return;
     img.style.aspectRatio = `${W}/${H}`;
     img.src = await templateThumb(i, W, H, 200);
   }
@@ -1449,6 +1486,7 @@ function colorPicker(id, value) {
   const v = toHex(value);
   return `<div class="color-picker" id="${id}">
     <div class="row"><input type="color" value="${v}" data-cp="input"><input type="text" value="${esc(value || '')}" data-cp="text" class="hex" spellcheck="false"></div>
+    ${state.brand.colors?.length ? `<div class="swatches brand-row" title="Brand colors">${state.brand.colors.map((c) => `<button style="background:${c}" data-cp="sw" data-c="${c}" title="Brand: ${c}"></button>`).join('')}</div>` : ''}
     <div class="swatches">${PALETTE.map((c) => `<button style="background:${c}" data-cp="sw" data-c="${c}" title="${c}"></button>`).join('')}
     <button class="none" data-cp="sw" data-c="transparent" title="Transparent"></button></div>
   </div>`;
@@ -1601,6 +1639,7 @@ function imageFiltersHTML(img) {
   const r = (id, label, min, max, step, v) =>
     `<label class="frow">${label} <input type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${v}"></label>`;
   return `
+    ${bgRemoverHTML()}
     <h4>Adjust</h4>
     <div class="field">
       ${r('fBright', 'Brightness', -1, 1, 0.02, f.brightness)}
@@ -1797,6 +1836,7 @@ function bindProps(o, text, img) {
     });
     $$('[data-fp]').forEach((b) => (b.onclick = () => { applyFilters(img, { ...read(), preset: b.dataset.fp }); commit(); renderProps(); }));
     $$('[data-fr]').forEach((b) => (b.onclick = () => applyFrame(b.dataset.fr)));
+    bindBgRemover(img);
     on('replaceImg', 'onclick', () => {
       const inp = document.createElement('input');
       inp.type = 'file';
@@ -1962,6 +2002,29 @@ async function exportDesign(fmt, { scale = 1, all = false, transparent = false }
     persist();
     return toast('Project file downloaded');
   }
+  if (fmt === 'gif' || fmt === 'video') {
+    const list = all ? d.pages : [d.pages[state.page]];
+    if (!list.some((pg) => pg.json?.objects?.some((o) => o.anim && o.anim.type !== 'none'))) {
+      toast('Tip: add animations in the Animate tab — exporting a still clip');
+    }
+    const btn = $('#doExport');
+    const onProgress = (pct) => {
+      const t = `Rendering… ${pct}%`;
+      if (btn && !btn.closest('[hidden]')) btn.textContent = t;
+      const s = $('#saveStatus');
+      if (s) s.textContent = t;
+    };
+    if (fmt === 'gif') {
+      const blob = await exportGIF(list, d.width, d.height, { maxSize: Math.round(600 * Math.min(2, scale)), onProgress });
+      download(URL.createObjectURL(blob), `${name}.gif`);
+    } else {
+      const { blob, ext } = await exportVideo(list, d.width, d.height, { maxSize: Math.round(1920 * Math.min(1, scale)), onProgress });
+      download(URL.createObjectURL(blob), `${name}.${ext}`);
+    }
+    const s = $('#saveStatus');
+    if (s) s.textContent = 'Saved';
+    return toast('Animation downloaded');
+  }
   const pages = fmt === 'pdf' || all ? d.pages.map((p, i) => [p, i]) : [[d.pages[state.page], state.page]];
   if (fmt === 'pdf') {
     const orientation = d.width >= d.height ? 'landscape' : 'portrait';
@@ -1993,9 +2056,387 @@ async function exportDesign(fmt, { scale = 1, all = false, transparent = false }
 }
 
 // =====================================================
+// ANIMATE
+// =====================================================
+function tabAnimate(p) {
+  const c = state.canvas;
+  const page = state.design.pages[state.page];
+  const dur = page.duration || 4;
+  const o = c.getActiveObject();
+  const objs = c.getActiveObjects();
+  const a = o && !(o instanceof ActiveSelection) ? o.anim || { type: 'none', duration: 0.8, delay: 0 } : null;
+  p.innerHTML = `
+    <h3>Animate</h3>
+    <button class="btn primary block" id="animPreview">${icon('play')} Preview animation</button>
+    <div class="field"><label>Page duration <b id="pdurV">${dur}s</b></label><input type="range" min="1" max="20" step="0.5" value="${dur}" id="pdur"></div>
+    <h4>Animate whole page</h4>
+    <div class="anim-grid">${PAGE_PRESETS.map((pr) => `<button class="anim-item" data-pp="${pr.id}">${pr.label}</button>`).join('')}</div>
+    <h4>Selected element</h4>
+    ${
+      objs.length
+        ? `<div class="anim-grid">${ANIMATIONS.map((an) => `<button class="anim-item ${a && a.type === an.id ? 'on' : ''}" data-an="${an.id}">${an.label}</button>`).join('')}</div>
+      ${a ? `<div class="field mt"><label>Duration <b>${(a.duration ?? 0.8).toFixed(1)}s</b></label><input type="range" min="0.2" max="5" step="0.1" value="${a.duration ?? 0.8}" id="anDur"></div>
+      <div class="field"><label>Delay <b>${(a.delay ?? 0).toFixed(1)}s</b></label><input type="range" min="0" max="10" step="0.1" value="${a.delay ?? 0}" id="anDelay"></div>` : ''}`
+        : '<p class="muted">Select an element on the page to give it its own animation.</p>'
+    }
+    <h4>Download animation</h4>
+    <button class="btn ghost block" id="animGif">${icon('download')} Download GIF</button>
+    <button class="btn ghost block" id="animVideo">${icon('download')} Download video (${(videoMime() || 'webm').includes('mp4') ? 'MP4' : 'WebM'})</button>
+    <p class="muted">Video and GIF include every page, each shown for its page duration.</p>`;
+
+  $('#animPreview').onclick = openAnimPreview;
+  $('#pdur').oninput = (e) => {
+    page.duration = +e.target.value;
+    $('#pdurV').textContent = page.duration + 's';
+    schedulePersist();
+  };
+  $$('[data-pp]', p).forEach(
+    (b) =>
+      (b.onclick = () => {
+        const pr = PAGE_PRESETS.find((x) => x.id === b.dataset.pp);
+        c.getObjects().forEach((obj, i) => {
+          obj.anim = pr.type === 'none' ? null : { type: pr.type, duration: 0.8, delay: +(i * pr.stagger).toFixed(2) };
+        });
+        const len = animationLength(c.toObject(PROPS));
+        if (len + 1 > (page.duration || 4)) page.duration = Math.min(20, Math.ceil(len + 1.5));
+        pushHistory();
+        schedulePersist();
+        tabAnimate(p);
+        toast(pr.type === 'none' ? 'Animations removed' : `"${pr.label}" applied to page`);
+      })
+  );
+  $$('[data-an]', p).forEach(
+    (b) =>
+      (b.onclick = () => {
+        objs.forEach((obj) => {
+          const prev = obj.anim || { duration: 0.8, delay: 0 };
+          obj.anim = b.dataset.an === 'none' ? null : { ...prev, type: b.dataset.an };
+        });
+        pushHistory();
+        schedulePersist();
+        tabAnimate(p);
+      })
+  );
+  const upd = (key, v) => {
+    objs.forEach((obj) => obj.anim && (obj.anim = { ...obj.anim, [key]: v }));
+    schedulePersist();
+  };
+  const d1 = $('#anDur');
+  if (d1) {
+    d1.oninput = (e) => { upd('duration', +e.target.value); d1.previousElementSibling.querySelector('b').textContent = (+e.target.value).toFixed(1) + 's'; };
+    d1.onchange = pushHistory;
+  }
+  const d2 = $('#anDelay');
+  if (d2) {
+    d2.oninput = (e) => { upd('delay', +e.target.value); d2.previousElementSibling.querySelector('b').textContent = (+e.target.value).toFixed(1) + 's'; };
+    d2.onchange = pushHistory;
+  }
+  $('#animGif').onclick = () => runExportButton($('#animGif'), () => exportDesign('gif', { all: true }));
+  $('#animVideo').onclick = () => runExportButton($('#animVideo'), () => exportDesign('video', { all: true }));
+}
+
+async function runExportButton(btn, fn) {
+  const html = btn.innerHTML;
+  btn.disabled = true;
+  try {
+    await fn((pct) => (btn.textContent = `Rendering… ${pct}%`));
+  } catch (e) {
+    console.error(e);
+    toast('Export failed: ' + e.message);
+  }
+  btn.disabled = false;
+  btn.innerHTML = html;
+}
+
+async function openAnimPreview() {
+  captureCurrentPage();
+  const d = state.design;
+  const modal = document.createElement('div');
+  modal.className = 'modal-back';
+  modal.innerHTML = `<div class="modal wide"><div class="row"><h3>Animation preview</h3><span class="spacer"></span><button class="icon-btn" id="pvClose">${icon('x')}</button></div>
+    <div class="row"><label class="row"><input type="radio" name="pvw" value="page" checked> This page</label><label class="row"><input type="radio" name="pvw" value="all"> All pages</label></div>
+    <div class="preview-box" id="pvBox"></div></div>`;
+  document.body.appendChild(modal);
+  let stop = null;
+  const start = async (all) => {
+    stop?.();
+    const pages = all ? d.pages : [d.pages[state.page]];
+    stop = await playPreview($('#pvBox'), pages, d.width, d.height, Math.min(740, innerWidth - 100, (innerHeight - 220) * Math.max(1, d.width / d.height)));
+  };
+  const close = () => { stop?.(); modal.remove(); };
+  $('#pvClose').onclick = close;
+  modal.onclick = (e) => e.target === modal && close();
+  $$('[name="pvw"]', modal).forEach((r) => (r.onchange = () => start(r.value === 'all')));
+  start(false);
+}
+
+// =====================================================
+// BRAND KIT
+// =====================================================
+async function loadBrand() {
+  try {
+    const b = await kvGet('brand');
+    if (b) state.brand = { ...state.brand, ...b };
+  } catch {}
+  for (const f of state.brand.fonts || []) await registerFont(f.name, f.data);
+}
+
+async function saveBrand() {
+  try {
+    await kvSet('brand', state.brand);
+  } catch (e) {
+    toast('Could not save brand kit');
+  }
+}
+
+async function registerFont(name, dataURL) {
+  try {
+    const ff = new FontFace(name, `url(${dataURL})`);
+    await ff.load();
+    document.fonts.add(ff);
+    if (!FONTS.includes(name)) FONTS.unshift(name);
+  } catch (e) {
+    console.warn('Font failed', name, e);
+  }
+}
+
+function tabBrand(p) {
+  const b = state.brand;
+  const fontOpts = (sel) => FONTS.map((f) => `<option ${f === sel ? 'selected' : ''}>${esc(f)}</option>`).join('');
+  p.innerHTML = `
+    <h3>Brand Kit</h3>
+    <p class="muted">Your brand colors, fonts and logos — available in every design.</p>
+    <h4>Brand colors</h4>
+    <div class="brand-colors">${(b.colors || []).map((c, i) => `<div class="bc" style="background:${c}" title="${c}" data-bci="${i}"><button data-bcrm="${i}" title="Remove">${icon('x', 12)}</button></div>`).join('')}
+      <label class="bc add" title="Add color">${icon('plus')}<input type="color" id="bcAdd" value="#7c3aed"></label></div>
+    <button class="btn ghost block mt" id="bcApply">${icon('palette')} Apply brand colors to page</button>
+    <h4>Brand fonts</h4>
+    <div class="field"><label>Heading</label><select id="bfH">${fontOpts(b.headingFont)}</select></div>
+    <div class="field"><label>Body</label><select id="bfB">${fontOpts(b.bodyFont)}</select></div>
+    <div class="row"><button class="btn ghost small" id="bfAddH" style="font-family:'${b.headingFont}'">+ Heading</button><button class="btn ghost small" id="bfAddB" style="font-family:'${b.bodyFont}'">+ Body text</button></div>
+    <button class="btn ghost block mt" id="bfApply">${icon('type')} Apply brand fonts to page</button>
+    <button class="btn ghost block" id="bfUpload">${icon('upload')} Upload a font (.ttf .otf .woff)</button>
+    <input type="file" id="bfFile" accept=".ttf,.otf,.woff,.woff2" hidden>
+    ${(b.fonts || []).length ? `<div class="muted">Your fonts: ${b.fonts.map((f) => `<span class="tag" style="font-family:'${esc(f.name)}'">${esc(f.name)} <button data-bfrm="${esc(f.name)}">×</button></span>`).join(' ')}</div>` : ''}
+    <h4>Logos</h4>
+    <button class="btn ghost block" id="blUpload">${icon('upload')} Upload logo</button>
+    <input type="file" id="blFile" accept="image/*" multiple hidden>
+    <div class="img-grid">${(b.logos || []).map((l, i) => `<div class="img-item logo-item"><img src="${l}" data-bl="${i}" alt=""><button class="rm" data-blrm="${i}">${icon('x')}</button></div>`).join('') || '<p class="muted">No logos yet.</p>'}</div>`;
+
+  $('#bcAdd').onchange = (e) => {
+    b.colors = [...(b.colors || []), e.target.value];
+    saveBrand();
+    tabBrand(p);
+  };
+  $$('[data-bcrm]', p).forEach((x) => (x.onclick = (e) => { e.stopPropagation(); b.colors.splice(+x.dataset.bcrm, 1); saveBrand(); tabBrand(p); }));
+  $$('[data-bci]', p).forEach((x) => (x.onclick = () => {
+    const col = b.colors[+x.dataset.bci];
+    if (state.canvas.getActiveObject()) setProp(state.canvas.getActiveObject().type === 'line' ? 'stroke' : 'fill', col);
+    else setBackgroundFill({ color: col });
+  }));
+  $('#bcApply').onclick = () => {
+    if (!b.colors?.length) return toast('Add some brand colors first');
+    let i = 0;
+    state.canvas.getObjects().forEach((o) => {
+      if (o.type === 'image' || isText(o) || o.type === 'group') return;
+      const key = o.type === 'line' || (o.type === 'path' && !o.fill) ? 'stroke' : 'fill';
+      if (o[key] === 'transparent' || !o[key]) return;
+      o.set(key, b.colors[i++ % b.colors.length]);
+    });
+    const texts = state.canvas.getObjects().filter(isText);
+    if (b.colors.length > 1) texts.forEach((t) => t.text.length > 2 && t.fill !== 'transparent' && t.set('fill', b.colors[0]));
+    state.canvas.requestRenderAll();
+    pushHistory();
+    schedulePersist();
+  };
+  $('#bfH').onchange = (e) => { b.headingFont = e.target.value; saveBrand(); tabBrand(p); };
+  $('#bfB').onchange = (e) => { b.bodyFont = e.target.value; saveBrand(); tabBrand(p); };
+  $('#bfAddH').onclick = () => addText({ text: 'Brand heading', font: b.headingFont, size: 0.09, weight: '700', color: b.colors?.[0] });
+  $('#bfAddB').onclick = () => addText({ text: 'Brand body text', font: b.bodyFont, size: 0.035, color: b.colors?.[1] });
+  $('#bfApply').onclick = async () => {
+    await ensureFont(b.headingFont, '700');
+    await ensureFont(b.bodyFont);
+    const big = minSide() * 0.06;
+    state.canvas.getObjects().filter(isText).forEach((t) => {
+      if (t.name === 'Sticker') return;
+      t.set('fontFamily', t.fontSize * (t.scaleY || 1) >= big ? b.headingFont : b.bodyFont);
+      t.initDimensions?.();
+      t.setCoords();
+    });
+    state.canvas.requestRenderAll();
+    pushHistory();
+    schedulePersist();
+  };
+  $('#bfUpload').onclick = () => $('#bfFile').click();
+  $('#bfFile').onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const name = f.name.replace(/\.[^.]+$/, '').replace(/[^\w\- ]/g, ' ').trim() || 'Custom font';
+    const data = await fileToDataURL(f);
+    await registerFont(name, data);
+    b.fonts = [...(b.fonts || []).filter((x) => x.name !== name), { name, data }];
+    await saveBrand();
+    toast(`Font "${name}" added`);
+    tabBrand(p);
+  };
+  $$('[data-bfrm]', p).forEach((x) => (x.onclick = () => { b.fonts = b.fonts.filter((f) => f.name !== x.dataset.bfrm); saveBrand(); tabBrand(p); }));
+  $('#blUpload').onclick = () => $('#blFile').click();
+  $('#blFile').onchange = async (e) => {
+    for (const f of e.target.files) {
+      let url = await fileToDataURL(f);
+      if (!f.type.includes('svg')) url = await shrinkDataURL(url, 1200);
+      b.logos = [...(b.logos || []), url];
+    }
+    await saveBrand();
+    tabBrand(p);
+  };
+  $$('[data-bl]', p).forEach((x) => (x.onclick = () => addImage(b.logos[+x.dataset.bl], { name: 'Logo' })));
+  $$('[data-blrm]', p).forEach((x) => (x.onclick = () => { b.logos.splice(+x.dataset.blrm, 1); saveBrand(); tabBrand(p); }));
+}
+
+// =====================================================
+// VERSION HISTORY
+// =====================================================
+async function openHistoryDialog() {
+  await persist();
+  const d = state.design;
+  const modal = document.createElement('div');
+  modal.className = 'modal-back';
+  document.body.appendChild(modal);
+  const render = async () => {
+    const versions = await listVersions(d.id);
+    modal.innerHTML = `<div class="modal wide">
+      <div class="row"><h3>Version history</h3><span class="spacer"></span><button class="icon-btn" id="vhClose">${icon('x')}</button></div>
+      <p class="muted">Artvas saves a version automatically every few minutes while you work (last 30 kept). You can also save one yourself.</p>
+      <div class="row"><input class="search" id="vhName" placeholder="Version name (optional)" style="margin:0"><button class="btn primary" id="vhSave">Save version</button></div>
+      <div class="versions">${
+        versions
+          .map(
+            (v) => `<div class="version">
+          <div class="vthumb">${v.design.pages?.[0]?.thumb ? `<img src="${v.design.pages[0].thumb}" alt="">` : ''}</div>
+          <div class="vmeta"><b>${esc(v.label || 'Version')}</b><small>${new Date(v.createdAt).toLocaleString()} · ${v.design.pages.length} page(s) · ${v.design.width}×${v.design.height}</small></div>
+          <button class="btn ghost small" data-vr="${v.id}">Restore</button>
+          <button class="icon-btn danger" data-vd="${v.id}" title="Delete">${icon('trash')}</button>
+        </div>`
+          )
+          .join('') || '<p class="muted">No versions yet.</p>'
+      }</div></div>`;
+    $('#vhClose').onclick = () => modal.remove();
+    $('#vhSave').onclick = async () => {
+      captureCurrentPage();
+      await saveVersion(d, $('#vhName').value.trim() || 'Saved version');
+      toast('Version saved');
+      render();
+    };
+    $$('[data-vr]', modal).forEach(
+      (b) =>
+        (b.onclick = async () => {
+          const v = await getVersion(b.dataset.vr);
+          if (!v || !confirm('Restore this version? Your current design will be saved as a version first.')) return;
+          captureCurrentPage();
+          await saveVersion(d, 'Before restore');
+          const restored = { ...structuredClone(v.design), id: d.id, updatedAt: Date.now() };
+          await saveDesign(restored);
+          modal.remove();
+          await openEditor(restored);
+          state.lastVersionAt = Date.now();
+          toast('Version restored');
+        })
+    );
+    $$('[data-vd]', modal).forEach((b) => (b.onclick = async () => { await deleteVersion(b.dataset.vd); render(); }));
+  };
+  modal.onclick = (e) => e.target === modal && modal.remove();
+  render();
+}
+
+async function maybeAutoVersion() {
+  const now = Date.now();
+  if (now - state.lastVersionAt < 3 * 60 * 1000) return;
+  state.lastVersionAt = now;
+  try {
+    await saveVersion(state.design, 'Auto-save');
+  } catch (e) {
+    console.warn(e);
+  }
+}
+
+// =====================================================
+// BACKGROUND REMOVER
+// =====================================================
+function bgRemoverHTML() {
+  return `
+    <h4>Background remover</h4>
+    <button class="btn primary block" id="bgAI">${icon('wand')} Remove background (AI)</button>
+    <p class="muted" id="bgAIstatus">Runs privately in your browser. First use downloads the AI model (~115 MB, then cached).</p>
+    <div class="field"><label>Remove a color <b id="tolV">25</b></label>
+      <div class="row"><input type="color" id="rcColor" value="#ffffff"><input type="range" id="rcTol" min="1" max="80" value="25" style="flex:1"></div>
+      <div class="row mt"><button class="btn ghost small" id="rcAuto">Auto (corner color)</button><button class="btn ghost small" id="rcGo">Remove color</button></div>
+    </div>
+    ${state.canvas.getActiveObject()?._origSrc ? `<button class="btn ghost small" id="bgRestore">Restore original</button>` : ''}`;
+}
+
+function bindBgRemover(img) {
+  const c = state.canvas;
+  const replace = async (url) => {
+    if (!img._origSrc) img._origSrc = img.getSrc();
+    const w = img.width;
+    const h = img.height;
+    await img.setSrc(url, { crossOrigin: 'anonymous' });
+    img.set({ width: w, height: h });
+    if (img.filters?.length) img.applyFilters();
+    img.setCoords();
+    c.requestRenderAll();
+    pushHistory();
+    schedulePersist();
+  };
+  const ai = $('#bgAI');
+  if (ai)
+    ai.onclick = async () => {
+      const status = $('#bgAIstatus');
+      ai.disabled = true;
+      try {
+        const url = await removeBackgroundAI(img.getSrc(), (msg) => { if (status) status.textContent = msg; });
+        await replace(url);
+        toast('Background removed');
+      } catch (e) {
+        console.error(e);
+        toast('Background removal failed: ' + (e.message || e));
+      }
+      if (ai.isConnected) {
+        ai.disabled = false;
+        renderProps();
+      }
+    };
+  const tol = $('#rcTol');
+  if (tol) tol.oninput = () => ($('#tolV').textContent = tol.value);
+  const go = async (auto) => {
+    try {
+      await replace(await removeColor(img.getSrc(), auto ? null : $('#rcColor').value, +$('#rcTol').value));
+    } catch (e) {
+      toast('Could not process this image');
+    }
+    renderProps();
+  };
+  const rcGo = $('#rcGo');
+  if (rcGo) rcGo.onclick = () => go(false);
+  const rcAuto = $('#rcAuto');
+  if (rcAuto) rcAuto.onclick = () => go(true);
+  const rs = $('#bgRestore');
+  if (rs)
+    rs.onclick = async () => {
+      const src = img._origSrc;
+      img._origSrc = null;
+      await replace(src);
+      img._origSrc = null;
+      renderProps();
+    };
+}
+
+// =====================================================
 // ROUTING
 // =====================================================
 async function boot() {
+  await loadBrand();
   const m = location.pathname.match(/^\/design\/([\w]+)/);
   if (m) {
     const d = await getDesign(m[1]).catch(() => null);

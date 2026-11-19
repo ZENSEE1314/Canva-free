@@ -1,5 +1,9 @@
 // Minimal stroke icon set (24x24), original drawings.
 const I = {
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  play: '<path d="M7 4v16l13-8z"/>',
+  brand: '<path d="M4 4h7l9 9-7 7-9-9z"/><circle cx="8.5" cy="8.5" r="1.5"/>',
+  wand: '<path d="m4 20 11-11M14 4v3M19 9h-3M17.5 5.5l-2 2M11 4l.5 1.5M19 13l-1.5-.5"/>',
   home: '<path d="M3 11 12 4l9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   minus: '<path d="M5 12h14"/>',
