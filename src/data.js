@@ -1,4 +1,5 @@
 import { MORE_TEMPLATES } from './templates2.js';
+import { TRENDING_TEMPLATES } from './templates3.js';
 
 // Static data: design sizes, fonts, colors, elements, templates.
 
@@ -24,7 +25,7 @@ export const SIZE_PRESETS = [
 ];
 
 export const FONTS = [
-  'Inter', 'Poppins', 'Montserrat', 'Roboto', 'Open Sans', 'Raleway', 'Oswald', 'Bebas Neue',
+  'Bricolage Grotesque', 'Instrument Serif', 'Unbounded', 'Syne', 'Fraunces', 'DM Sans', 'Shrikhand', 'Inter', 'Poppins', 'Montserrat', 'Roboto', 'Open Sans', 'Raleway', 'Oswald', 'Bebas Neue',
   'Anton', 'Archivo Black', 'Space Grotesk', 'Josefin Sans', 'Righteous', 'Playfair Display',
   'DM Serif Display', 'Abril Fatface', 'Lora', 'Merriweather', 'Lobster', 'Pacifico',
   'Dancing Script', 'Great Vibes', 'Caveat', 'Permanent Marker',
@@ -407,4 +408,10 @@ const DEFAULT_CATS = {
   'Fresh Promo': 'Food', 'Dark Tech': 'Event', 'Wedding Invite': 'Cards', 'YouTube Hook': 'Social',
 };
 TEMPLATES.forEach((t) => { if (!t.cat) t.cat = DEFAULT_CATS[t.name] || 'Other'; });
+// Replace the older Instagram / YouTube / Story designs with the trending set; keep other formats.
+{
+  const keep = TEMPLATES.filter((t) => !['ig', 'yt', 'story'].includes(t.fmt));
+  TEMPLATES.length = 0;
+  TEMPLATES.push(...TRENDING_TEMPLATES, ...keep);
+}
 export const TEMPLATE_CATS = ['All', ...new Set(TEMPLATES.map((t) => t.cat))];

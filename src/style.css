@@ -306,6 +306,14 @@ kbd { background: #f1f0f5; border: 1px solid var(--line); border-bottom-width: 2
 .ph-box b { color: var(--ink); }
 .ph-box .btn { margin-bottom: 0; }
 
+/* Dialogs */
+.modal.small { width: min(420px, 100%); }
+.dlg-msg { margin: 0; font-size: 15px; line-height: 1.5; }
+.btn.danger { background: var(--danger); color: #fff; }
+.btn.danger:hover { filter: brightness(1.08); }
+.btn:focus-visible, .icon-btn:focus-visible, .tab:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.save-preview { max-width: 100%; max-height: 60vh; display: block; margin: 0 auto; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,.15); }
+
 /* Responsive */
 @media (max-width: 1100px) {
   .props { width: 240px; }

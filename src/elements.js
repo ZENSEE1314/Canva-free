@@ -1,4 +1,4 @@
-import { Rect, Circle, Triangle, Polygon, Path, Line, Textbox, Gradient, Shadow } from 'fabric';
+import { Rect, Circle, Triangle, Polygon, Path, Line, Textbox, Gradient, Shadow, Pattern } from 'fabric';
 
 function regularPolygon(sides, r, rot = -Math.PI / 2) {
   const pts = [];
@@ -104,7 +104,7 @@ export function makeGradient(colors, width, height, angle = 135) {
 export function buildTemplate(tpl, W, H) {
   const m = Math.min(W, H);
   const objects = [];
-  for (const it of tpl.items) {
+  for (let it of tpl.items) {
     let o;
     if (it.t === 'text' || it.t === 'emoji') {
       o = new Textbox(it.text, {
@@ -128,6 +128,16 @@ export function buildTemplate(tpl, W, H) {
         name: it.t === 'emoji' ? 'Sticker' : 'Text',
       });
       if (it.t === 'emoji') o.set({ width: it.size * m * 1.4 });
+      if (it.grad) {
+        o.initDimensions();
+        o.set('fill', new Gradient({
+          type: 'linear',
+          gradientUnits: 'pixels',
+          coords: { x1: 0, y1: 0, x2: it.gradDir === 'x' ? o.width : 0, y2: it.gradDir === 'x' ? 0 : o.height },
+          colorStops: it.grad.map((c, i) => ({ offset: i / (it.grad.length - 1), color: c })),
+        }));
+      }
+      if (it.glow) o.set('shadow', new Shadow({ color: it.glow, blur: m * 0.04, offsetX: 0, offsetY: 0 }));
     } else if (it.t === 'rect') {
       o = new Rect({
         width: it.w * W,
@@ -147,8 +157,15 @@ export function buildTemplate(tpl, W, H) {
         fill: it.fill,
       });
       o.set({ originX: 'center', originY: 'center' });
+    } else if (it.t === 'glow') {
+      o = createGlow(it.r * m, it.color);
+      o.set({ originX: 'center', originY: 'center' });
+    } else if (it.t === 'grain') {
+      o = createGrain(W, H, it.amount ?? 0.12);
+      o.set({ originX: 'center', originY: 'center' });
+      it = { ...it, x: 0.5, y: 0.5 };
     } else if (it.t === 'circle') {
-      o = new Circle({ radius: it.r * m, fill: it.fill, originX: 'center', originY: 'center', name: 'Circle' });
+      o = new Circle({ radius: it.r * m, fill: it.fill, originX: 'center', originY: 'center', name: 'Circle', stroke: it.stroke || null, strokeWidth: it.strokeW ? it.strokeW * m : 0 });
     } else if (it.t === 'shape') {
       o = createShape(it.shape, it.s * m, it.fill);
       o.set({ originX: 'center', originY: 'center' });
@@ -157,6 +174,8 @@ export function buildTemplate(tpl, W, H) {
     o.set({ left: it.x * W, top: it.y * H });
     if (it.angle && it.t !== 'text' && it.t !== 'emoji') o.set({ angle: it.angle });
     if (it.opacity != null) o.set({ opacity: it.opacity });
+    if (it.blend) o.set({ globalCompositeOperation: it.blend });
+    if (it.drop && !o.shadow) o.set({ shadow: new Shadow({ color: it.drop, blur: m * 0.04, offsetX: 0, offsetY: m * 0.015 }) });
     o.setCoords();
     objects.push(o);
   }
@@ -176,5 +195,59 @@ export function createPhotoPlaceholder(w, h, { rx = 0, fill } = {}) {
     strokeDashArray: [Math.max(6, Math.min(w, h) * 0.03), Math.max(6, Math.min(w, h) * 0.02)],
     name: 'Photo placeholder',
     placeholder: true,
+  });
+}
+
+/** Soft blurred color blob (radial gradient fading to transparent) — for aurora / mesh backgrounds. */
+export function createGlow(radius, color) {
+  return new Circle({
+    radius,
+    fill: new Gradient({
+      type: 'radial',
+      gradientUnits: 'pixels',
+      coords: { x1: radius, y1: radius, r1: 0, x2: radius, y2: radius, r2: radius },
+      colorStops: [
+        { offset: 0, color },
+        { offset: 0.45, color: withAlpha(color, 0.55) },
+        { offset: 1, color: withAlpha(color, 0) },
+      ],
+    }),
+    name: 'Glow',
+  });
+}
+
+function withAlpha(color, a) {
+  const m = /^#([0-9a-f]{6})$/i.exec(color);
+  if (!m) return color;
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+
+let grainTile;
+function grainCanvas() {
+  if (grainTile) return grainTile;
+  const c = document.createElement('canvas');
+  c.width = c.height = 160;
+  const ctx = c.getContext('2d');
+  const d = ctx.createImageData(160, 160);
+  for (let i = 0; i < d.data.length; i += 4) {
+    const v = Math.random() * 255;
+    d.data[i] = d.data[i + 1] = d.data[i + 2] = v;
+    d.data[i + 3] = 255;
+  }
+  ctx.putImageData(d, 0, 0);
+  grainTile = c;
+  return c;
+}
+
+/** Full-page film-grain texture overlay. */
+export function createGrain(W, H, amount = 0.12) {
+  return new Rect({
+    width: W,
+    height: H,
+    fill: new Pattern({ source: grainCanvas(), repeat: 'repeat' }),
+    opacity: amount,
+    globalCompositeOperation: 'overlay',
+    name: 'Grain texture',
   });
 }

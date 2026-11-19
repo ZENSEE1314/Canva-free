@@ -61,7 +61,7 @@ function toast(msg) {
 
 // ---------- Fonts ----------
 const fontsReady = Promise.all(
-  FONTS.flatMap((f) => [document.fonts.load(`400 40px "${f}"`), document.fonts.load(`700 40px "${f}"`)])
+  FONTS.flatMap((f) => ['400', '700', '800', '900', 'italic 400', 'italic 700'].map((w) => document.fonts.load(`${w} 40px "${f}"`)))
 ).catch(() => {});
 
 async function ensureFont(family, weight = '400', style = 'normal') {
@@ -78,7 +78,7 @@ async function renderHome() {
   state.canvas?.dispose();
   state.canvas = null;
   state.design = null;
-  history.replaceState(null, '', '/');
+  try { history.replaceState(null, '', location.pathname + location.search); } catch {}
   const designs = await listDesigns().catch(() => []);
   app.innerHTML = `
   <div class="home">
@@ -180,7 +180,7 @@ async function renderHome() {
   );
   $$('[data-del]').forEach((b) =>
     b.addEventListener('click', async () => {
-      if (!confirm('Delete this design permanently?')) return;
+      if (!(await askConfirm('Delete this design permanently?', { ok: 'Delete', danger: true }))) return;
       await deleteDesign(b.dataset.del);
       renderHome();
     })
@@ -263,7 +263,7 @@ async function openEditor(design) {
   state.design = design;
   state.page = 0;
   state.lastVersionAt = 0;
-  history.replaceState(null, '', `/design/${design.id}`);
+  try { history.replaceState(null, '', `#/design/${design.id}`); } catch {}
   app.innerHTML = editorHTML();
   bindTopbar();
   bindTabs();
@@ -963,7 +963,7 @@ function renderPages() {
         await loadPage(i + 1);
       } else if (act === 'del') {
         if (d.pages.length === 1) return toast('A design needs at least one page');
-        if (!confirm(`Delete page ${i + 1}?`)) return;
+        if (!(await askConfirm(`Delete page ${i + 1}?`, { ok: 'Delete page', danger: true }))) return;
         d.pages.splice(i, 1);
         await loadPage(Math.min(i, d.pages.length - 1));
       } else if (act === 'up' && i > 0) {
@@ -1168,7 +1168,7 @@ async function applyTemplate(i) {
   const c = state.canvas;
   const { width: W, height: H } = state.design;
   const hasContent = c.getObjects().length > 0;
-  if (hasContent && !confirm('Replace the current page with this template?')) return;
+  if (hasContent && !(await askConfirm('Replace the current page with this template?', { ok: 'Replace' }))) return;
   await fontsReady;
   state.loading = true;
   c.clear();
@@ -2030,8 +2030,8 @@ function bindPageProps() {
   $('#pgMoreBg').onclick = () => $('[data-tab="background"]').click();
   $('#pgResize').onclick = openResizeDialog;
   $('#pgSaveTpl').onclick = openSaveTemplateDialog;
-  $('#pgClear').onclick = () => {
-    if (!confirm('Remove everything from this page?')) return;
+  $('#pgClear').onclick = async () => {
+    if (!(await askConfirm('Remove everything from this page?', { ok: 'Clear page', danger: true }))) return;
     const c = state.canvas;
     state.loading = true;
     c.clear();
@@ -2109,6 +2109,7 @@ function download(url, filename) {
   document.body.appendChild(a);
   a.click();
   a.remove();
+  if (isEmbedded) showSaveFallback(url, filename);
 }
 
 const safeName = () => (state.design.name || 'artvas-design').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') || 'artvas-design';
@@ -2453,7 +2454,7 @@ async function openHistoryDialog() {
       (b) =>
         (b.onclick = async () => {
           const v = await getVersion(b.dataset.vr);
-          if (!v || !confirm('Restore this version? Your current design will be saved as a version first.')) return;
+          if (!v || !(await askConfirm('Restore this version? Your current design will be saved as a version first.', { ok: 'Restore' }))) return;
           captureCurrentPage();
           await saveVersion(d, 'Before restore');
           const restored = { ...structuredClone(v.design), id: d.id, updatedAt: Date.now() };
@@ -2646,7 +2647,7 @@ async function applyMyTemplate(id) {
   const t = state.myTemplates.find((x) => x.id === id);
   if (!t) return;
   const c = state.canvas;
-  if (c.getObjects().length && !confirm('Replace the current page with this template?')) return;
+  if (c.getObjects().length && !(await askConfirm('Replace the current page with this template?', { ok: 'Replace' }))) return;
   const d = state.design;
   const scaled = [];
   for (const p of t.pages) scaled.push(await scalePageJSON(p.json, t.width, t.height, d.width, d.height));
@@ -2680,17 +2681,17 @@ async function newDesignFromMyTemplate(id) {
 async function renameMyTemplate(id) {
   const t = state.myTemplates.find((x) => x.id === id);
   if (!t) return;
-  const name = prompt('Template name', t.name);
-  if (name == null) return;
-  const cat = prompt('Category', t.cat);
+  const res = await askText('Edit template', [{ label: 'Template name', value: t.name }, { label: 'Category', value: t.cat }]);
+  if (!res) return;
+  const [name, cat] = res;
   t.name = name.trim() || t.name;
-  if (cat != null) t.cat = cat.trim() || t.cat;
+  t.cat = cat.trim() || t.cat;
   await saveMyTemplates();
 }
 
 async function deleteMyTemplate(id) {
   const t = state.myTemplates.find((x) => x.id === id);
-  if (!t || !confirm(`Delete template "${t.name}"?`)) return;
+  if (!t || !(await askConfirm(`Delete template "${t.name}"?`, { ok: 'Delete', danger: true }))) return;
   state.myTemplates = state.myTemplates.filter((x) => x.id !== id);
   await saveMyTemplates();
 }
@@ -2747,12 +2748,80 @@ function bindMyTemplateCards(root, onUse, rerender) {
 }
 
 // =====================================================
+// IN-APP DIALOGS (work everywhere, including sandboxed frames)
+// =====================================================
+function askConfirm(message, { ok = 'OK', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const modal = document.createElement('div');
+    modal.className = 'modal-back';
+    modal.innerHTML = `<div class="modal small" role="dialog" aria-modal="true">
+      <p class="dlg-msg">${esc(message)}</p>
+      <div class="row end"><button class="btn ghost" data-r="0">Cancel</button><button class="btn ${danger ? 'danger' : 'primary'}" data-r="1">${esc(ok)}</button></div>
+    </div>`;
+    const done = (v) => { modal.remove(); document.removeEventListener('keydown', key, true); resolve(v); };
+    const key = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); done(false); }
+      if (e.key === 'Enter') { e.stopPropagation(); done(true); }
+    };
+    modal.onclick = (e) => {
+      if (e.target === modal) return done(false);
+      const b = e.target.closest('[data-r]');
+      if (b) done(b.dataset.r === '1');
+    };
+    document.addEventListener('keydown', key, true);
+    document.body.appendChild(modal);
+    $('[data-r="1"]', modal).focus();
+  });
+}
+
+/** Ask for one or more text values. fields: [{ label, value }]. Resolves to an array of strings or null. */
+function askText(title, fields, { ok = 'Save' } = {}) {
+  return new Promise((resolve) => {
+    const modal = document.createElement('div');
+    modal.className = 'modal-back';
+    modal.innerHTML = `<form class="modal small" role="dialog" aria-modal="true">
+      <h3>${esc(title)}</h3>
+      ${fields.map((f, i) => `<label class="flabel">${esc(f.label)}<input class="search" id="askf${i}" value="${esc(f.value || '')}"></label>`).join('')}
+      <div class="row end"><button type="button" class="btn ghost" data-cancel>Cancel</button><button type="submit" class="btn primary">${esc(ok)}</button></div>
+    </form>`;
+    const form = $('form', modal);
+    const done = (v) => { modal.remove(); resolve(v); };
+    form.onsubmit = (e) => { e.preventDefault(); done(fields.map((_, i) => $(`#askf${i}`, modal).value)); };
+    $('[data-cancel]', modal).onclick = () => done(null);
+    modal.onclick = (e) => { if (e.target === modal) done(null); };
+    modal.onkeydown = (e) => { if (e.key === 'Escape') { e.stopPropagation(); done(null); } };
+    document.body.appendChild(modal);
+    $('#askf0', modal).select();
+  });
+}
+
+const isEmbedded = (() => { try { return window.self !== window.top; } catch { return true; } })();
+
+/** When running inside a sandboxed frame (where downloads are blocked), show the file so it can be saved by hand. */
+function showSaveFallback(url, filename) {
+  const isImg = /\.(png|jpe?g|gif|svg)$/i.test(filename);
+  const isVid = /\.(mp4|webm)$/i.test(filename);
+  const modal = document.createElement('div');
+  modal.className = 'modal-back';
+  modal.innerHTML = `<div class="modal wide">
+    <div class="row"><h3>${esc(filename)}</h3><span class="spacer"></span><button class="icon-btn" data-x>${icon('x')}</button></div>
+    ${isImg ? `<img class="save-preview" src="${url}" alt="${esc(filename)}">
+      <p class="muted">If the download didn’t start: on a phone, press and hold the image and choose <b>Save image</b>; on a computer, right-click it and choose <b>Save image as…</b></p>`
+      : isVid ? `<video class="save-preview" src="${url}" controls playsinline></video>
+      <p class="muted">If the download didn’t start: right-click the video (or use its ⋮ menu) and choose <b>Save video as…</b></p>`
+      : `<p class="muted">This preview page can’t save ${esc(filename.split('.').pop().toUpperCase())} files. Use the full Artvas site (your Railway link) to download this format, or export as PNG / JPG here.</p>`}
+  </div>`;
+  modal.onclick = (e) => { if (e.target === modal || e.target.closest('[data-x]')) modal.remove(); };
+  document.body.appendChild(modal);
+}
+
+// =====================================================
 // ROUTING
 // =====================================================
 async function boot() {
   await loadBrand();
   await loadMyTemplates();
-  const m = location.pathname.match(/^\/design\/([\w]+)/);
+  const m = (location.hash.match(/^#\/design\/(\w+)/) || location.pathname.match(/^\/design\/(\w+)/));
   if (m) {
     const d = await getDesign(m[1]).catch(() => null);
     if (d) return openEditor(d);
