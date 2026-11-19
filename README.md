@@ -20,6 +20,7 @@ Artvas is a free design editor that runs in the browser. Use it to make social p
 - **Undo and redo, copy and paste, duplicate, group and ungroup, lock, and a right-click menu.**
 - **Resize**: change a design to another size, either in place or as a resized copy.
 - **Download**: PNG (with an optional transparent background), JPG, SVG, a multi-page PDF, or a `.json` project file. You can export at 0.5× to 3× size.
+- **My templates**: save any design (one page or all pages) as your own template with a name and category. Templates fit any design size when used. You can use them from the editor or start a new design from the home page, and rename, delete, export and import them (a `.json` file, so you can move them to another browser or computer).
 - **Background remover**: AI background removal ([BiRefNet_lite](https://huggingface.co/onnx-community/BiRefNet_lite-ONNX), MIT license) that runs privately in the browser. The model is downloaded once (about 115 MB) and then cached. There is also a "remove a color" tool for logos and flat backgrounds, and you can restore the original image.
 - **Animations**: 13 element animations (fade, rise, drop, slide, zoom, pop, spin, bounce, typewriter, blink, pulse, wiggle), whole-page presets with staggered timing, per-element duration and delay, page duration, and a live preview.
 - **Animated downloads**: an animated GIF, or an MP4 video (WebM in browsers that can't record MP4). Every page plays in order.

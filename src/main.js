@@ -41,6 +41,7 @@ const state = {
   tplCat: 'All',
   brand: { colors: [], headingFont: 'Montserrat', bodyFont: 'Inter', logos: [], fonts: [] },
   lastVersionAt: 0,
+  myTemplates: [],
 };
 
 // ---------- Toast ----------
@@ -108,6 +109,10 @@ async function renderHome() {
         ).join('')}
       </div>
     </section>
+    ${state.myTemplates.length ? `<section class="home-section">
+      <h2>My templates <small>(${state.myTemplates.length})</small></h2>
+      <div class="tpl-row mine-row">${myTemplateCards()}</div>
+    </section>` : ''}
     <section class="home-section">
       <h2>Start from a template</h2>
       <div class="tpl-row">
@@ -151,6 +156,7 @@ async function renderHome() {
   $('#newCustom').onclick = custom;
   $('#newCustomTop').onclick = () => newDesign(1080, 1080, 'Instagram Post');
   $('#openFile').onchange = (e) => importDesignFile(e.target.files[0]);
+  bindMyTemplateCards(app, (id) => newDesignFromMyTemplate(id), renderHome);
   $$('[data-t]').forEach((b) =>
     b.addEventListener('click', () => newDesign(1080, 1080, TEMPLATES[+b.dataset.t].name, +b.dataset.t))
   );
@@ -1163,18 +1169,37 @@ function renderTab() {
 }
 
 async function tabTemplates(p) {
+  const mine = state.myTemplates;
+  const cats = [TEMPLATE_CATS[0], ...(mine.length ? ['Mine'] : []), ...TEMPLATE_CATS.slice(1)];
+  if (!cats.includes(state.tplCat)) state.tplCat = 'All';
   p.innerHTML = `<h3>Templates</h3>
-    <input class="search" id="tplSearch" placeholder="Search ${TEMPLATES.length} templates…">
-    <div class="chips">${TEMPLATE_CATS.map((c) => `<button class="chip ${state.tplCat === c ? 'on' : ''}" data-cat="${c}">${c}</button>`).join('')}</div>
-    <div class="tpl-grid">${TEMPLATES.map(
+    <button class="btn primary block" id="saveTpl">${icon('save')} Save this design as a template</button>
+    <input class="search" id="tplSearch" placeholder="Search templates…">
+    <div class="chips">${cats.map((c) => `<button class="chip ${state.tplCat === c ? 'on' : ''}" data-cat="${c}">${c === 'Mine' ? 'My templates' : c}</button>`).join('')}</div>
+    <div id="mineWrap">
+      <div class="row"><h4 style="margin:6px 0">My templates ${mine.length ? `<small class="muted">(${mine.length})</small>` : ''}</h4><span class="spacer"></span>
+        <button class="btn ghost small" id="tplImport" title="Import templates from a file">Import</button>
+        ${mine.length ? `<button class="btn ghost small" id="tplExport" title="Download your templates as a file">Export</button>` : ''}
+        <input type="file" id="tplImportFile" accept=".json" hidden></div>
+      ${mine.length ? `<div class="tpl-grid">${myTemplateCards()}</div>` : `<p class="muted">Design something, then click “Save this design as a template” to reuse it anytime.</p>`}
+    </div>
+    <h4 id="builtinTitle">Artvas templates</h4>
+    <div class="tpl-grid" id="builtinGrid">${TEMPLATES.map(
       (t, i) => `<button class="tpl-card" data-ti="${i}" data-name="${esc(t.name.toLowerCase())} ${t.cat.toLowerCase()}" data-tcat="${t.cat}"><img data-tthumb="${i}" alt=""><span>${esc(t.name)}</span></button>`
     ).join('')}</div>`;
   const filter = () => {
     const q = $('#tplSearch', p).value.toLowerCase();
+    const cat = state.tplCat;
     $$('[data-ti]', p).forEach((b) => {
-      const ok = (state.tplCat === 'All' || b.dataset.tcat === state.tplCat) && b.dataset.name.includes(q);
+      const ok = (cat === 'All' || b.dataset.tcat === cat) && b.dataset.name.includes(q);
       b.style.display = ok ? '' : 'none';
     });
+    $$('[data-mt]', p).forEach((b) => {
+      b.style.display = b.dataset.name.includes(q) ? '' : 'none';
+    });
+    $('#mineWrap', p).style.display = cat === 'All' || cat === 'Mine' ? '' : 'none';
+    $('#builtinTitle', p).style.display = cat === 'Mine' ? 'none' : '';
+    $('#builtinGrid', p).style.display = cat === 'Mine' ? 'none' : '';
   };
   $('#tplSearch', p).oninput = filter;
   $$('[data-cat]', p).forEach(
@@ -1186,6 +1211,15 @@ async function tabTemplates(p) {
       })
   );
   filter();
+  $('#saveTpl', p).onclick = openSaveTemplateDialog;
+  $('#tplImport', p).onclick = () => $('#tplImportFile', p).click();
+  $('#tplImportFile', p).onchange = async (e) => {
+    await importMyTemplates(e.target.files[0]);
+    tabTemplates(p);
+  };
+  const ex = $('#tplExport', p);
+  if (ex) ex.onclick = exportMyTemplates;
+  bindMyTemplateCards(p, (id) => applyMyTemplate(id), () => tabTemplates(p));
   $$('[data-ti]', p).forEach((b) => (b.onclick = () => applyTemplate(+b.dataset.ti)));
   const { width: W, height: H } = state.design;
   for (let i = 0; i < TEMPLATES.length; i++) {
@@ -1866,6 +1900,7 @@ function pagePropsHTML() {
     <button class="btn ghost block" id="pgMoreBg">${icon('palette')} More backgrounds</button>
     <h4>Design</h4>
     <p class="muted">${d.width} × ${d.height} px · ${d.pages.length} page(s)</p>
+    <button class="btn ghost block" id="pgSaveTpl">${icon('save')} Save as template</button>
     <button class="btn ghost block" id="pgResize">${icon('resize')} Resize design</button>
     <button class="btn ghost block" id="pgClear">${icon('trash')} Clear page</button>
     <h4>Keyboard shortcuts</h4>
@@ -1884,6 +1919,7 @@ function bindPageProps() {
   bindColorPicker('pgBg', (v) => setBackgroundFill({ color: v }));
   $('#pgMoreBg').onclick = () => $('[data-tab="background"]').click();
   $('#pgResize').onclick = openResizeDialog;
+  $('#pgSaveTpl').onclick = openSaveTemplateDialog;
   $('#pgClear').onclick = () => {
     if (!confirm('Remove everything from this page?')) return;
     const c = state.canvas;
@@ -1916,7 +1952,7 @@ function openResizeDialog() {
   document.body.appendChild(modal);
   $$('[data-rp]', modal).forEach((b) => (b.onclick = () => { const p = SIZE_PRESETS[+b.dataset.rp]; $('#rw').value = p.w; $('#rh').value = p.h; }));
   $('#rcancel').onclick = () => modal.remove();
-  modal.onclick = (e) => e.target === modal && modal.remove();
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   $('#rok').onclick = async () => {
     const w = Math.max(16, Math.min(8000, +$('#rw').value));
     const h = Math.max(16, Math.min(8000, +$('#rh').value));
@@ -1930,33 +1966,8 @@ async function resizeDesign(W2, H2, copy) {
   await persist();
   const d = copy ? structuredClone(state.design) : state.design;
   if (copy) { d.id = uid(); d.name = `${d.name} (${W2}×${H2})`; }
-  const W = d.width;
-  const H = d.height;
-  const s = Math.min(W2 / W, H2 / H);
-  const ox = (W2 - W * s) / 2;
-  const oy = (H2 - H * s) / 2;
   for (const page of d.pages) {
-    if (!page.json) continue;
-    const el = document.createElement('canvas');
-    const sc = new StaticCanvas(el, { width: W, height: H, renderOnAddRemove: false });
-    await sc.loadFromJSON(page.json);
-    sc.getObjects().forEach((o) => {
-      const center = o.getCenterPoint();
-      o.set({ scaleX: o.scaleX * s, scaleY: o.scaleY * s });
-      o.setPositionByOrigin({ x: center.x * s + ox, y: center.y * s + oy }, 'center', 'center');
-      o.setCoords();
-    });
-    if (sc.backgroundImage) {
-      const bi = sc.backgroundImage;
-      const cs = Math.max(W2 / bi.width, H2 / bi.height);
-      bi.set({ scaleX: cs, scaleY: cs, originX: 'center', originY: 'center', left: W2 / 2, top: H2 / 2 });
-    }
-    if (sc.bgGradient || page.json.bgGradient) {
-      const g = sc.bgGradient || page.json.bgGradient;
-      sc.backgroundColor = makeGradient(g.colors, W2, H2, g.angle);
-    }
-    page.json = sc.toObject(PROPS);
-    sc.dispose();
+    if (page.json) page.json = await scalePageJSON(page.json, d.width, d.height, W2, H2);
   }
   d.width = W2;
   d.height = H2;
@@ -2165,7 +2176,7 @@ async function openAnimPreview() {
   };
   const close = () => { stop?.(); modal.remove(); };
   $('#pvClose').onclick = close;
-  modal.onclick = (e) => e.target === modal && close();
+  modal.onclick = (e) => { if (e.target === modal) close(); };
   $$('[name="pvw"]', modal).forEach((r) => (r.onchange = () => start(r.value === 'all')));
   start(false);
 }
@@ -2345,7 +2356,7 @@ async function openHistoryDialog() {
     );
     $$('[data-vd]', modal).forEach((b) => (b.onclick = async () => { await deleteVersion(b.dataset.vd); render(); }));
   };
-  modal.onclick = (e) => e.target === modal && modal.remove();
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   render();
 }
 
@@ -2433,10 +2444,204 @@ function bindBgRemover(img) {
 }
 
 // =====================================================
+// MY TEMPLATES (user-saved templates)
+// =====================================================
+async function loadMyTemplates() {
+  try {
+    state.myTemplates = (await kvGet('myTemplates')) || [];
+  } catch {
+    state.myTemplates = [];
+  }
+}
+async function saveMyTemplates() {
+  try {
+    await kvSet('myTemplates', state.myTemplates);
+  } catch (e) {
+    console.error(e);
+    toast('Could not save templates (storage full?)');
+  }
+}
+
+/** Scale a page's JSON from W×H to W2×H2, keeping everything centered and proportional. */
+async function scalePageJSON(json, W, H, W2, H2) {
+  if (!json) return json;
+  if (W === W2 && H === H2) return structuredClone(json);
+  const s = Math.min(W2 / W, H2 / H);
+  const ox = (W2 - W * s) / 2;
+  const oy = (H2 - H * s) / 2;
+  const el = document.createElement('canvas');
+  const sc = new StaticCanvas(el, { width: W, height: H, renderOnAddRemove: false });
+  await sc.loadFromJSON(structuredClone(json));
+  sc.getObjects().forEach((o) => {
+    const center = o.getCenterPoint();
+    o.set({ scaleX: o.scaleX * s, scaleY: o.scaleY * s });
+    o.setPositionByOrigin({ x: center.x * s + ox, y: center.y * s + oy }, 'center', 'center');
+    o.setCoords();
+  });
+  if (sc.backgroundImage) {
+    const bi = sc.backgroundImage;
+    const cs = Math.max(W2 / bi.width, H2 / bi.height);
+    bi.set({ scaleX: cs, scaleY: cs, originX: 'center', originY: 'center', left: W2 / 2, top: H2 / 2 });
+  }
+  const g = sc.bgGradient || json.bgGradient;
+  if (g) sc.backgroundColor = makeGradient(g.colors, W2, H2, g.angle);
+  const out = sc.toObject(PROPS);
+  sc.dispose();
+  return out;
+}
+
+const TEMPLATE_DEFAULT_CATS = ['Social', 'Business', 'Sale', 'Event', 'Cards', 'Food', 'Holiday', 'Quote', 'Other'];
+
+function openSaveTemplateDialog() {
+  captureCurrentPage();
+  const d = state.design;
+  const cats = [...new Set([...state.myTemplates.map((t) => t.cat), ...TEMPLATE_DEFAULT_CATS])];
+  const modal = document.createElement('div');
+  modal.className = 'modal-back';
+  modal.innerHTML = `<div class="modal">
+    <h3>Save as template</h3>
+    <p class="muted">Your template appears under <b>My templates</b> and fits any design size when you use it.</p>
+    <label class="flabel">Template name<input class="search" id="stName" value="${esc(d.name)}"></label>
+    <label class="flabel">Category<input class="search" id="stCat" list="stCats" value="${esc(state.myTemplates[0]?.cat || 'Social')}"><datalist id="stCats">${cats.map((c) => `<option value="${esc(c)}">`).join('')}</datalist></label>
+    <div class="row"><label class="row"><input type="radio" name="stScope" value="page" checked> This page only</label>
+    ${d.pages.length > 1 ? `<label class="row"><input type="radio" name="stScope" value="all"> All ${d.pages.length} pages</label>` : ''}</div>
+    <div class="row end"><button class="btn ghost" id="stCancel">Cancel</button><button class="btn primary" id="stOk">Save template</button></div>
+  </div>`;
+  document.body.appendChild(modal);
+  $('#stName').select();
+  $('#stCancel').onclick = () => modal.remove();
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  $('#stOk').onclick = async () => {
+    const all = $('[name="stScope"]:checked', modal)?.value === 'all';
+    const src = all ? d.pages : [d.pages[state.page]];
+    const t = {
+      id: uid(),
+      name: $('#stName').value.trim() || 'My template',
+      cat: $('#stCat').value.trim() || 'Other',
+      width: d.width,
+      height: d.height,
+      pages: src.map((p) => ({ json: structuredClone(p.json), duration: p.duration })),
+      thumb: src[0].thumb,
+      createdAt: Date.now(),
+    };
+    state.myTemplates.unshift(t);
+    await saveMyTemplates();
+    modal.remove();
+    toast(`Saved "${t.name}" to My templates`);
+    if (state.tab === 'templates') renderTab();
+  };
+}
+
+async function applyMyTemplate(id) {
+  const t = state.myTemplates.find((x) => x.id === id);
+  if (!t) return;
+  const c = state.canvas;
+  if (c.getObjects().length && !confirm('Replace the current page with this template?')) return;
+  const d = state.design;
+  const scaled = [];
+  for (const p of t.pages) scaled.push(await scalePageJSON(p.json, t.width, t.height, d.width, d.height));
+  captureCurrentPage();
+  d.pages[state.page].json = scaled[0];
+  d.pages[state.page].duration = t.pages[0].duration;
+  const extra = scaled.slice(1).map((json, i) => ({ id: uid(), json, thumb: '', duration: t.pages[i + 1].duration }));
+  d.pages.splice(state.page + 1, 0, ...extra);
+  await loadPage(state.page);
+  pushHistory();
+  renderPages();
+  await persist();
+  if (extra.length) toast(`Template added (${t.pages.length} pages)`);
+}
+
+async function newDesignFromMyTemplate(id) {
+  const t = state.myTemplates.find((x) => x.id === id);
+  if (!t) return;
+  const design = {
+    id: uid(),
+    name: t.name,
+    width: t.width,
+    height: t.height,
+    pages: t.pages.map((p, i) => ({ id: uid(), json: structuredClone(p.json), thumb: i === 0 ? t.thumb : '', duration: p.duration })),
+    updatedAt: Date.now(),
+  };
+  await saveDesign(design);
+  await openEditor(design);
+}
+
+async function renameMyTemplate(id) {
+  const t = state.myTemplates.find((x) => x.id === id);
+  if (!t) return;
+  const name = prompt('Template name', t.name);
+  if (name == null) return;
+  const cat = prompt('Category', t.cat);
+  t.name = name.trim() || t.name;
+  if (cat != null) t.cat = cat.trim() || t.cat;
+  await saveMyTemplates();
+}
+
+async function deleteMyTemplate(id) {
+  const t = state.myTemplates.find((x) => x.id === id);
+  if (!t || !confirm(`Delete template "${t.name}"?`)) return;
+  state.myTemplates = state.myTemplates.filter((x) => x.id !== id);
+  await saveMyTemplates();
+}
+
+function exportMyTemplates() {
+  if (!state.myTemplates.length) return toast('You have no templates to export yet');
+  const blob = new Blob([JSON.stringify({ app: 'artvas-templates', version: 1, templates: state.myTemplates })], { type: 'application/json' });
+  download(URL.createObjectURL(blob), 'artvas-templates.json');
+  toast(`Exported ${state.myTemplates.length} template(s)`);
+}
+
+async function importMyTemplates(file) {
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    let list = [];
+    if (Array.isArray(data.templates)) list = data.templates;
+    else if (data.pages && data.width) {
+      // An Artvas design file can be imported as a template too
+      list = [{ id: uid(), name: data.name || 'Imported', cat: 'Other', width: data.width, height: data.height, pages: data.pages.map((p) => ({ json: p.json, duration: p.duration })), thumb: data.pages[0]?.thumb || '', createdAt: Date.now() }];
+    } else throw new Error('bad');
+    const ids = new Set(state.myTemplates.map((t) => t.id));
+    const fresh = list.filter((t) => t && t.pages && t.width && !ids.has(t.id));
+    state.myTemplates = [...fresh, ...state.myTemplates];
+    await saveMyTemplates();
+    toast(`Imported ${fresh.length} template(s)`);
+  } catch {
+    toast('That file is not an Artvas template file');
+  }
+}
+
+function myTemplateCards(onUse) {
+  return state.myTemplates
+    .map(
+      (t) => `<div class="tpl-card mine" data-mt="${t.id}" data-name="${esc((t.name + ' ' + t.cat).toLowerCase())}" data-tcat="${esc(t.cat)}">
+      <div class="mt-thumb" style="aspect-ratio:${t.width}/${t.height}">${t.thumb ? `<img src="${t.thumb}" alt="">` : ''}${t.pages.length > 1 ? `<span class="pnum">${t.pages.length} pages</span>` : ''}</div>
+      <span>${esc(t.name)}</span><small>${esc(t.cat)} · ${t.width}×${t.height}</small>
+      <div class="mt-acts"><button data-mtren="${t.id}" title="Rename">✎</button><button data-mtdel="${t.id}" title="Delete">${icon('trash', 14)}</button></div>
+    </div>`
+    )
+    .join('');
+}
+
+function bindMyTemplateCards(root, onUse, rerender) {
+  $$('[data-mt]', root).forEach((card) =>
+    card.addEventListener('click', async (e) => {
+      const ren = e.target.closest('[data-mtren]');
+      const del = e.target.closest('[data-mtdel]');
+      if (ren) { await renameMyTemplate(ren.dataset.mtren); return rerender(); }
+      if (del) { await deleteMyTemplate(del.dataset.mtdel); return rerender(); }
+      onUse(card.dataset.mt);
+    })
+  );
+}
+
+// =====================================================
 // ROUTING
 // =====================================================
 async function boot() {
   await loadBrand();
+  await loadMyTemplates();
   const m = location.pathname.match(/^\/design\/([\w]+)/);
   if (m) {
     const d = await getDesign(m[1]).catch(() => null);
