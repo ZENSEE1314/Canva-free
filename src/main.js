@@ -40,6 +40,10 @@ const state = {
   uploads: [],
   tplCat: 'All',
   tplFmt: 'fit',
+  panelOpen: true,
+  propsOpen: false,
+  propsClosedByUser: false,
+  autoFit: true,
   brand: { colors: [], headingFont: 'Montserrat', bodyFont: 'Inter', logos: [], fonts: [] },
   lastVersionAt: 0,
   myTemplates: [],
@@ -280,7 +284,20 @@ async function openEditor(design) {
   styleControls();
   bindCanvasEvents();
   bindKeyboard();
-  window.addEventListener('resize', fitZoom);
+  state.panelOpen = !isMobile();
+  state.propsOpen = false;
+  state.propsClosedByUser = false;
+  state.autoFit = true;
+  syncPanels();
+  $('#panelClose').onclick = () => setPanelOpen(false);
+  $('#propsClose').onclick = () => {
+    state.propsClosedByUser = true;
+    setPropsOpen(false);
+  };
+  const ro = new ResizeObserver(() => {
+    if (state.autoFit) fitZoom();
+  });
+  ro.observe($('#stage'));
 
   await fontsReady;
   await loadPage(0);
@@ -305,22 +322,22 @@ function editorHTML() {
     ['layers', 'layers', 'Layers'],
   ];
   return `
-  <div class="editor">
+  <div class="editor" id="editor">
     <header class="topbar">
       <button class="icon-btn light" id="goHome" title="Home">${icon('home')}</button>
       <div class="logo small">${logoSvg()}<span>Artvas</span></div>
       <div class="sep"></div>
       <button class="icon-btn light" id="undo" title="Undo (Ctrl+Z)">${icon('undo')}</button>
       <button class="icon-btn light" id="redo" title="Redo (Ctrl+Y)">${icon('redo')}</button>
-      <button class="tb-btn" id="resizeBtn">${icon('resize')} Resize</button>
-      <button class="tb-btn" id="historyBtn" title="Version history">${icon('clock')} History</button>
+      <button class="tb-btn" id="resizeBtn" title="Resize design">${icon('resize')}<span class="lbl">Resize</span></button>
+      <button class="tb-btn" id="historyBtn" title="Version history">${icon('clock')}<span class="lbl">History</span></button>
       <span class="save-status" id="saveStatus">Saved</span>
       <input class="title-input" id="title" value="${esc(d.name)}" spellcheck="false">
       <div class="spacer"></div>
       <span class="dim-label">${d.width} × ${d.height}px</span>
-      <button class="tb-btn" id="saveFile" title="Download editable .json file">${icon('save')} Save file</button>
+      <button class="tb-btn" id="saveFile" title="Download editable .json file">${icon('save')}<span class="lbl">Save file</span></button>
       <div class="dropdown">
-        <button class="btn primary" id="shareBtn">${icon('download')} Download</button>
+        <button class="btn primary" id="shareBtn" title="Download">${icon('download')}<span class="lbl">Download</span></button>
         <div class="menu" id="exportMenu" hidden>
           <label>File type
             <select id="exFormat">
@@ -344,7 +361,11 @@ function editorHTML() {
       <nav class="tabs">
         ${tabs.map(([id, ic, label]) => `<button class="tab ${state.tab === id ? 'active' : ''}" data-tab="${id}">${icon(ic)}<span>${label}</span></button>`).join('')}
       </nav>
-      <aside class="panel" id="panel"></aside>
+      <aside class="panel" id="panelWrap">
+        <div class="sheet-handle"></div>
+        <button class="panel-close icon-btn" id="panelClose" title="Hide panel">${icon('chevLeft')}</button>
+        <div class="panel-body" id="panel"></div>
+      </aside>
       <section class="workspace">
         <div class="ctx-bar" id="ctxBar"></div>
         <div class="stage" id="stage">
@@ -360,7 +381,11 @@ function editorHTML() {
           </div>
         </div>
       </section>
-      <aside class="props" id="props"></aside>
+      <aside class="props" id="propsWrap">
+        <div class="sheet-handle"></div>
+        <button class="panel-close icon-btn" id="propsClose" title="Hide edit panel">${icon('x')}</button>
+        <div class="panel-body" id="props"></div>
+      </aside>
     </div>
     <div class="ctxmenu" id="ctxMenu" hidden></div>
     <input type="file" id="fileUpload" accept="image/*" multiple hidden>
@@ -425,15 +450,16 @@ function bindTopbar() {
   };
   $('#resizeBtn').onclick = openResizeDialog;
   $('#historyBtn').onclick = openHistoryDialog;
-  $('#zoomIn').onclick = () => setZoom(state.zoom * 1.2);
-  $('#zoomOut').onclick = () => setZoom(state.zoom / 1.2);
-  $('#zoomFit').onclick = fitZoom;
-  $('#zoomRange').oninput = (e) => setZoom(+e.target.value / 100);
+  $('#zoomIn').onclick = () => { state.autoFit = false; setZoom(state.zoom * 1.2); };
+  $('#zoomOut').onclick = () => { state.autoFit = false; setZoom(state.zoom / 1.2); };
+  $('#zoomFit').onclick = () => { state.autoFit = true; fitZoom(); };
+  $('#zoomRange').oninput = (e) => { state.autoFit = false; setZoom(+e.target.value / 100); };
   $('#stage').addEventListener(
     'wheel',
     (e) => {
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
+      state.autoFit = false;
       setZoom(state.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1));
     },
     { passive: false }
@@ -481,8 +507,9 @@ function setZoom(z) {
 function fitZoom() {
   const stage = $('#stage');
   if (!stage || !state.design) return;
-  const pad = 64;
+  const pad = isMobile() ? 24 : 56;
   const z = Math.min((stage.clientWidth - pad) / state.design.width, (stage.clientHeight - pad) / state.design.height);
+  if (!(z > 0)) return;
   state.fitZoom = z;
   setZoom(z);
 }
@@ -1011,6 +1038,7 @@ function place(obj, { center = true } = {}) {
   c.add(obj);
   c.setActiveObject(obj);
   c.requestRenderAll();
+  if (isMobile()) setPanelOpen(false);
   renderProps();
   return obj;
 }
@@ -1223,9 +1251,14 @@ async function templateThumb(i, W, H, size) {
 function bindTabs() {
   $$('.tab').forEach((t) =>
     t.addEventListener('click', () => {
+      if (state.tab === t.dataset.tab && state.panelOpen) {
+        setPanelOpen(false);
+        return;
+      }
       state.tab = t.dataset.tab;
       $$('.tab').forEach((x) => x.classList.toggle('active', x === t));
-      $('#panel').classList.remove('collapsed');
+      if (isMobile()) setPropsOpen(false);
+      setPanelOpen(true);
       renderTab();
     })
   );
@@ -1672,9 +1705,12 @@ function renderProps() {
   const c = state.canvas;
   const o = c.getActiveObject();
   if (!o) {
-    bar.innerHTML = `<span class="muted">Select an element to edit it · Right-click for more options · Shortcuts: T text, R rectangle, C circle</span>`;
+    bar.innerHTML = `<span class="muted hint">Select an element to edit it · Right-click for more options · Shortcuts: T text, R rectangle, C circle</span><span class="spacer"></span>
+      <button class="tb-btn small ctx-toggle" id="propsToggle" title="Page settings">${icon('palette')}<span>Page</span></button>`;
     el.innerHTML = pagePropsHTML();
     bindPageProps();
+    $('#propsToggle').onclick = () => { state.propsClosedByUser = false; setPropsOpen(!state.propsOpen); };
+    if (state.propsOpen && !state.propsPinned) setPropsOpen(false);
     return;
   }
   const multi = o instanceof ActiveSelection;
@@ -1758,6 +1794,9 @@ function renderProps() {
       <button class="btn ghost small" data-q="back">To back</button>
       ${img ? `<button class="btn ghost small" data-q="setbg">Set as background</button><button class="btn ghost small" id="replaceImg">Replace</button>` : ''}
     </div>`;
+  bar.insertAdjacentHTML('beforeend', `<button class="tb-btn small ctx-toggle ${state.propsOpen ? 'on' : ''}" id="propsToggle" title="Show all edit options">${icon('resize')}<span>Edit</span></button>`);
+  $('#propsToggle').onclick = () => { state.propsClosedByUser = !state.propsOpen ? false : true; state.propsPinned = false; setPropsOpen(!state.propsOpen); };
+  if (!isMobile() && !state.propsClosedByUser && !state.propsOpen) setPropsOpen(true);
   bindProps(o, text, img);
 }
 
@@ -2813,6 +2852,34 @@ function showSaveFallback(url, filename) {
   </div>`;
   modal.onclick = (e) => { if (e.target === modal || e.target.closest('[data-x]')) modal.remove(); };
   document.body.appendChild(modal);
+}
+
+// =====================================================
+// PANELS / RESPONSIVE LAYOUT
+// =====================================================
+const isMobile = () => window.matchMedia('(max-width: 760px)').matches;
+
+function syncPanels() {
+  const ed = $('#editor');
+  if (!ed) return;
+  ed.classList.toggle('panel-closed', !state.panelOpen);
+  ed.classList.toggle('props-open', !!state.propsOpen);
+  $$('.tab').forEach((x) => x.classList.toggle('active', state.panelOpen && x.dataset.tab === state.tab));
+  const t = $('#propsToggle');
+  if (t) t.classList.toggle('on', !!state.propsOpen);
+}
+function setPanelOpen(open) {
+  state.panelOpen = open;
+  if (!open && state.canvas?.isDrawingMode && isMobile()) {
+    // keep drawing mode on phones so the user can draw after closing the sheet
+  }
+  syncPanels();
+}
+function setPropsOpen(open) {
+  state.propsOpen = open;
+  state.propsPinned = open && !state.canvas?.getActiveObject();
+  if (open && isMobile()) state.panelOpen = false;
+  syncPanels();
 }
 
 // =====================================================
