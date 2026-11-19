@@ -158,6 +158,7 @@ export function buildTemplate(tpl, W, H) {
         fill: it.fill,
       });
       o.set({ originX: 'center', originY: 'center' });
+      if (it.ai) o.set({ aiPrompt: it.ai });
     } else if (it.t === 'glow') {
       o = createGlow(it.r * m, it.color);
       o.set({ originX: 'center', originY: 'center' });

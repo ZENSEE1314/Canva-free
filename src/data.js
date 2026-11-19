@@ -1,5 +1,6 @@
 import { MORE_TEMPLATES } from './templates2.js';
 import { TRENDING_TEMPLATES } from './templates3.js';
+import { TEMPLATE_AI_PROMPTS } from './aiprompts.js';
 
 // Static data: design sizes, fonts, colors, elements, templates.
 
@@ -414,4 +415,13 @@ TEMPLATES.forEach((t) => { if (!t.cat) t.cat = DEFAULT_CATS[t.name] || 'Other'; 
   TEMPLATES.length = 0;
   TEMPLATES.push(...TRENDING_TEMPLATES, ...keep);
 }
+// Attach AI prompts to photo spots so they can be filled with generated images.
+TEMPLATES.forEach((t) => {
+  const prompts = TEMPLATE_AI_PROMPTS[t.name];
+  if (!prompts) return;
+  let i = 0;
+  t.items.forEach((it) => {
+    if (it.t === 'photo' && !it.ai) it.ai = prompts[i++] || prompts[prompts.length - 1];
+  });
+});
 export const TEMPLATE_CATS = ['All', ...new Set(TEMPLATES.map((t) => t.cat))];

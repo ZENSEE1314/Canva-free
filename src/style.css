@@ -440,3 +440,14 @@ kbd { background: #f1f0f5; border: 1px solid var(--line); border-bottom-width: 2
   .tab .ic { width: 30px; height: 30px; padding: 6px; }
   .tab.active { box-shadow: none; }
 }
+
+/* ===== AI Image ===== */
+.ai-connect, .ai-fill { background: linear-gradient(135deg, #fff4ee, #f3edff); border: 1px solid #eadcff; border-radius: 12px; padding: 14px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 8px; }
+.ai-connect p, .ai-fill p { margin: 0; }
+.ai-fill { margin-top: 14px; }
+.ai-note { display: flex; gap: 8px; align-items: center; background: var(--brand-soft); color: var(--brand); border-radius: 8px; padding: 8px 10px; font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+.ai-prompt { resize: vertical; min-height: 90px; line-height: 1.45; }
+.grid2 select { width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.ai-settings { margin-top: 16px; font-size: 13px; }
+.ai-settings summary { cursor: pointer; font-weight: 600; color: var(--ink-2); }
+#aiGo:disabled { opacity: .55; cursor: not-allowed; }

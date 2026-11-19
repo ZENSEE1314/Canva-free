@@ -15,11 +15,12 @@ import {
   PACK_CATS, loadPack, flatSrc, loadIcons, POPULAR_ICONS, iconSVG, createIcon, CHART_PRESETS, buildChart, TABLE_PRESETS, buildTable,
   GRIDS, buildGrid, gridPreview, FRAMES, buildFrame, GRADIENT_ELEMENTS, buildGradientElement, gradientPreview,
 } from './library.js';
+import { AI_MODELS, AI_STYLES, closestRatio, getKey, setKey, generateImage, toDataURL } from './ai.js';
 import { icon } from './icons.js';
 
 const PROPS = [
   'name', 'locked', 'selectable', 'evented', 'hasControls', 'lockMovementX', 'lockMovementY',
-  'lockRotation', 'lockScalingX', 'lockScalingY', 'bgGradient', 'anim', 'placeholder', 'frameShape', 'kind', 'chart', 'table',
+  'lockRotation', 'lockScalingX', 'lockScalingY', 'bgGradient', 'anim', 'placeholder', 'frameShape', 'kind', 'chart', 'table', 'aiPrompt',
 ];
 
 const app = document.getElementById('app');
@@ -315,6 +316,7 @@ function editorHTML() {
   const d = state.design;
   const tabs = [
     ['templates', 'layout', 'Templates'],
+    ['ai', 'wand', 'AI Image'],
     ['text', 'type', 'Text'],
     ['elements', 'shapes', 'Elements'],
     ['uploads', 'upload', 'Uploads'],
@@ -542,7 +544,7 @@ function bindCanvasEvents() {
   c.on('text:editing:exited', onChange);
   const onSel = () => {
     renderProps();
-    if (state.tab === 'animate') renderTab();
+    if (state.tab === 'animate' || state.tab === 'ai') renderTab();
   };
   c.on('selection:created', onSel);
   c.on('selection:updated', onSel);
@@ -1286,7 +1288,7 @@ function renderTab() {
     state.canvas.isDrawingMode = false;
     state.drawing.on = false;
   }
-  const map = { templates: tabTemplates, text: tabText, elements: tabElements, uploads: tabUploads, photos: tabPhotos, draw: tabDraw, background: tabBackground, animate: tabAnimate, brand: tabBrand, layers: tabLayers };
+  const map = { ai: tabAI, templates: tabTemplates, text: tabText, elements: tabElements, uploads: tabUploads, photos: tabPhotos, draw: tabDraw, background: tabBackground, animate: tabAnimate, brand: tabBrand, layers: tabLayers };
   map[state.tab]?.(p);
 }
 
@@ -1992,7 +1994,8 @@ function renderProps() {
     ${o.placeholder ? `<div class="ph-box">${icon('image', 28)}<b>Photo placeholder</b>
       <p class="muted">Upload a photo, or click any image in Uploads, Photos or Brand Kit logos to fill this frame.</p>
       <button class="btn primary block" id="phUpload">${icon('upload')} Upload photo</button>
-      <button class="btn ghost block" id="phPhotos">${icon('image')} Choose from Photos</button></div>` : ''}
+      <button class="btn ghost block" id="phPhotos">${icon('image')} Choose from Photos</button>
+      <button class="btn ghost block" id="phAI">${icon('wand')} Generate with AI</button></div>` : ''}
     ${dataPropsHTML(o)}
     ${!text && !img && !o.chart && !o.table ? `
     <div class="field"><label>${o.kind === 'icon' ? 'Icon color' : o.type === 'line' ? 'Line color' : 'Fill'}</label>${colorPicker('pFill', o.type === 'line' || (o.type === 'path' && !o.fill) ? o.stroke : fill)}</div>
@@ -2148,6 +2151,11 @@ function bindProps(o, text, img) {
     inp.click();
   });
   on('phPhotos', 'onclick', () => $('[data-tab="photos"]').click());
+  on('phAI', 'onclick', () => {
+    state.ai.promptTouched = false;
+    if (state.tab === 'ai' && state.panelOpen) return renderTab();
+    $('[data-tab="ai"]').click();
+  });
 
   // quick bar
   $$('[data-q]').forEach((b) => (b.onclick = () => runAction(b.dataset.q).then(renderProps)));
@@ -3093,6 +3101,186 @@ function showSaveFallback(url, filename) {
   </div>`;
   modal.onclick = (e) => { if (e.target === modal || e.target.closest('[data-x]')) modal.remove(); };
   document.body.appendChild(modal);
+}
+
+// =====================================================
+// AI IMAGE (Muapi.ai)
+// =====================================================
+state.ai = { prompt: '', style: 'photo', model: AI_MODELS[0].id, ratio: 'auto', count: 1, busy: false, history: [] };
+(async () => {
+  try {
+    state.ai.history = (await kvGet('aiHistory')) || [];
+  } catch {}
+})();
+async function saveAIHistory() {
+  try {
+    await kvSet('aiHistory', state.ai.history.slice(0, 24));
+  } catch {}
+}
+
+function aiTargetSize(o) {
+  if (o) return [o.width * o.scaleX, o.height * o.scaleY];
+  return [state.design.width, state.design.height];
+}
+
+async function tabAI(p) {
+  const a = state.ai;
+  const key = getKey();
+  const c = state.canvas;
+  const sel = c.getActiveObject();
+  const ph = sel?.placeholder ? sel : null;
+  const spots = c.getObjects().filter((o) => o.placeholder);
+  const model = AI_MODELS.find((m) => m.id === a.model) || AI_MODELS[0];
+  if (ph && ph.aiPrompt && !a.promptTouched) a.prompt = ph.aiPrompt;
+  const ratios = model.ar || ['1:1', '4:3', '3:4', '16:9', '9:16', '3:2', '2:3'];
+  const [tw, th] = aiTargetSize(ph);
+  const autoRatio = closestRatio(tw, th, ratios);
+  p.innerHTML = `
+    <h3>AI Image</h3>
+    ${
+      key
+        ? ''
+        : `<div class="ai-connect">
+      <b>Connect your Muapi.ai key</b>
+      <p class="muted">Artvas creates images with 10+ AI models through Muapi.ai. Images are billed to your own Muapi account. Your key is saved only in this browser.</p>
+      <label class="flabel">API key<input class="search" id="aiKey" type="password" autocomplete="off" placeholder="Paste your Muapi API key"></label>
+      <button class="btn primary block" id="aiKeySave">Save key</button>
+      <p class="muted">Get a key at <a href="https://muapi.ai" target="_blank" rel="noopener">muapi.ai</a></p>
+    </div>`
+    }
+    ${ph ? `<div class="ai-note">${icon('image', 16)} Results will fill the selected photo spot.</div>` : ''}
+    <label class="flabel">Describe your image<textarea class="search ai-prompt" id="aiPrompt" rows="4" placeholder="e.g. a golden retriever wearing sunglasses on a beach at sunset">${esc(a.prompt)}</textarea></label>
+    <h4>Style</h4>
+    <div class="chips">${AI_STYLES.map((s) => `<button class="chip ${a.style === s.id ? 'on' : ''}" data-aist="${s.id}">${s.label}</button>`).join('')}</div>
+    <div class="grid2 mt">
+      <label>Model<select id="aiModel">${AI_MODELS.map((m) => `<option value="${m.id}" ${m.id === model.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></label>
+      <label>Shape<select id="aiRatio"><option value="auto">Auto (${autoRatio})</option>${ratios.map((r) => `<option value="${r}" ${a.ratio === r ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
+      <label>Images<select id="aiCount">${[1, 2, 3, 4].map((n) => `<option ${a.count === n ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+    </div>
+    <button class="btn primary block mt" id="aiGo" ${!key || a.busy ? 'disabled' : ''}>${icon('wand')} ${a.busy ? 'Generating…' : 'Generate'}</button>
+    <p class="muted" id="aiStatus">${a.status ? esc(a.status) : ''}</p>
+    ${
+      spots.length
+        ? `<div class="ai-fill"><b>${spots.length} empty photo spot${spots.length > 1 ? 's' : ''} on this page</b>
+      <p class="muted">Fill every spot with an AI image that matches the template${spots.some((s) => s.aiPrompt) ? '' : ' (uses your description above)'}.</p>
+      <button class="btn ghost block" id="aiFillAll" ${!key || a.busy ? 'disabled' : ''}>${icon('wand')} Generate photos for this page</button></div>`
+        : ''
+    }
+    <h4>Your AI images</h4>
+    <div class="img-grid" id="aiHist">${
+      a.history.length
+        ? a.history.map((h, i) => `<div class="img-item"><img src="${h.src}" data-aih="${i}" title="${esc(h.prompt)}" alt=""><button class="rm bgset" data-aibg="${i}" title="Use as background">${icon('palette')}</button></div>`).join('')
+        : '<p class="muted">Images you generate appear here. Click one to add it to your design.</p>'
+    }</div>
+    ${key ? `<details class="ai-settings"><summary>AI settings</summary>
+      <p class="muted">Connected to Muapi.ai with your key (saved in this browser only).</p>
+      <button class="btn ghost small" id="aiKeyRemove">Remove key</button></details>` : ''}`;
+
+  const prm = $('#aiPrompt', p);
+  prm.oninput = () => {
+    a.prompt = prm.value;
+    a.promptTouched = true;
+  };
+  $$('[data-aist]', p).forEach((b) => (b.onclick = () => { a.style = b.dataset.aist; $$('[data-aist]', p).forEach((x) => x.classList.toggle('on', x === b)); }));
+  $('#aiModel', p).onchange = (e) => { a.model = e.target.value; a.ratio = 'auto'; tabAI(p); };
+  $('#aiRatio', p).value = a.ratio;
+  $('#aiRatio', p).onchange = (e) => (a.ratio = e.target.value);
+  $('#aiCount', p).onchange = (e) => (a.count = +e.target.value);
+  const save = $('#aiKeySave', p);
+  if (save) save.onclick = () => {
+    const v = $('#aiKey', p).value.trim();
+    if (!v) return toast('Paste your API key first');
+    setKey(v);
+    toast('Key saved in this browser');
+    tabAI(p);
+  };
+  const rm = $('#aiKeyRemove', p);
+  if (rm) rm.onclick = () => { setKey(''); tabAI(p); };
+  $('#aiGo', p).onclick = () => runAIGenerate(p);
+  const fill = $('#aiFillAll', p);
+  if (fill) fill.onclick = () => runAIFillAll(p);
+  $$('[data-aih]', p).forEach((img) => (img.onclick = () => addImage(a.history[+img.dataset.aih].src, { name: 'AI image' })));
+  $$('[data-aibg]', p).forEach((b) => (b.onclick = () => setBackgroundImage(a.history[+b.dataset.aibg].src)));
+}
+
+function aiSetStatus(p, msg) {
+  state.ai.status = msg;
+  const s = $('#aiStatus', p);
+  if (s) s.textContent = msg;
+}
+
+async function aiOne(prompt, ratio) {
+  const a = state.ai;
+  const style = AI_STYLES.find((s) => s.id === a.style);
+  const url = await generateImage({ model: a.model, prompt: prompt + (style?.suffix || ''), aspectRatio: ratio, onStatus: (m) => aiSetStatus(state.aiPanel, m) });
+  const src = await toDataURL(url);
+  a.history.unshift({ src, prompt, t: Date.now() });
+  a.history = a.history.slice(0, 24);
+  saveAIHistory();
+  return src;
+}
+
+async function runAIGenerate(p) {
+  const a = state.ai;
+  const prompt = a.prompt.trim();
+  if (!prompt) return toast('Describe the image you want first');
+  const sel = state.canvas.getActiveObject();
+  const ph = sel?.placeholder ? sel : null;
+  const model = AI_MODELS.find((m) => m.id === a.model) || AI_MODELS[0];
+  const [tw, th] = aiTargetSize(ph);
+  const ratio = a.ratio === 'auto' ? closestRatio(tw, th, model.ar || undefined) : a.ratio;
+  a.busy = true;
+  state.aiPanel = p;
+  tabAI(p);
+  try {
+    const results = await Promise.allSettled(Array.from({ length: a.count }, () => aiOne(prompt, ratio)));
+    const ok = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+    if (!ok.length) throw results[0].reason;
+    if (ph && state.canvas.getObjects().includes(ph)) await fillPlaceholder(ph, ok[0]);
+    else if (a.count === 1) await addImage(ok[0], { name: 'AI image', noFill: true });
+    a.status = ok.length < a.count ? `Done — ${a.count - ok.length} image(s) failed.` : 'Done! Click an image below to use it.';
+  } catch (e) {
+    console.error(e);
+    a.status = e.message || 'Generation failed.';
+    toast(a.status);
+  }
+  a.busy = false;
+  if (state.tab === 'ai') tabAI(p);
+}
+
+async function runAIFillAll(p) {
+  const a = state.ai;
+  const spots = state.canvas.getObjects().filter((o) => o.placeholder);
+  if (!spots.length) return;
+  const fallback = a.prompt.trim() || `${state.design.name} photo`;
+  const model = AI_MODELS.find((m) => m.id === a.model) || AI_MODELS[0];
+  a.busy = true;
+  state.aiPanel = p;
+  tabAI(p);
+  let done = 0;
+  let failed = 0;
+  const queue = [...spots];
+  const worker = async () => {
+    while (queue.length) {
+      const ph = queue.shift();
+      try {
+        const [w, h] = aiTargetSize(ph);
+        const src = await aiOne(ph.aiPrompt || fallback, closestRatio(w, h, model.ar || undefined));
+        if (state.canvas.getObjects().includes(ph)) await fillPlaceholder(ph, src);
+        done++;
+      } catch (e) {
+        failed++;
+        console.error(e);
+        a.status = e.message;
+      }
+      aiSetStatus(p, `Filled ${done} of ${spots.length}${failed ? ` · ${failed} failed` : ''}`);
+    }
+  };
+  await Promise.all([worker(), worker()]);
+  a.busy = false;
+  a.status = failed ? `Filled ${done} of ${spots.length}. ${a.status || ''}` : `Filled all ${done} photo spot${done > 1 ? 's' : ''}.`;
+  if (failed && !done) toast(a.status);
+  if (state.tab === 'ai') tabAI(p);
 }
 
 // =====================================================
