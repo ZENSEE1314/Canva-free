@@ -370,7 +370,7 @@ kbd { background: #f1f0f5; border: 1px solid var(--line); border-bottom-width: 2
 
 /* Phone: canvas full width, tools in a bottom bar, panels as slide-up sheets */
 @media (max-width: 760px) {
-  .editor { height: 100%; min-height: 100dvh; }
+  .editor { height: 100vh; height: 100dvh; min-height: 0; max-height: 100dvh; }
   .topbar { height: 50px; gap: 2px; padding: 0 6px; }
   .topbar .sep, #resizeBtn, #saveFile, .logo.small { display: none; }
   .title-input { flex: 1; width: auto; min-width: 0; margin-left: 4px; font-size: 14px; }
@@ -477,7 +477,7 @@ kbd { background: #f1f0f5; border: 1px solid var(--line); border-bottom-width: 2
 
 /* ===== Video editor ===== */
 .video-editor .workspace { background: #16121f; }
-.v-stage { flex: 1; min-height: 0; display: grid; place-items: center; padding: 16px; background: #16121f; }
+.v-stage { flex: 1 1 0; min-height: 0; min-width: 0; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; padding: 16px; background: #16121f; overflow: hidden; position: relative; }
 .v-stage canvas { box-shadow: 0 10px 40px rgba(0,0,0,.45); border-radius: 6px; background: #000; touch-action: none; cursor: pointer; max-width: 100%; max-height: 100%; }
 .v-controls { height: 48px; display: flex; align-items: center; gap: 4px; padding: 0 10px; background: #1d1829; color: #e9e5f5; border-top: 1px solid #2c2540; flex: none; }
 .v-controls .tool { color: #e9e5f5; gap: 6px; display: inline-flex; align-items: center; font-size: 13px; }
@@ -652,3 +652,10 @@ kbd { background: #f1f0f5; border: 1px solid var(--line); border-bottom-width: 2
 .file-hide { position: absolute !important; width: 1px !important; height: 1px !important; opacity: 0 !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; pointer-events: none; left: 0; top: 0; }
 label.btn { cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
 label.btn.block { display: flex; }
+
+/* the preview only ever takes the space left over; it never pushes the timeline off screen */
+.video-editor .workspace { min-height: 0; overflow: hidden; }
+.video-editor .v-controls, .video-editor .tl { flex-shrink: 0; }
+@media (max-width: 760px) and (max-height: 680px) {
+  .video-editor .tl { height: 140px; }
+}

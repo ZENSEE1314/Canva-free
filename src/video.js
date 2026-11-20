@@ -268,6 +268,8 @@ async function importFiles(files, { add = true } = {}) {
   }
   renderPanel();
   commit();
+  // phones: show the timeline with the new clips instead of leaving the sheet over it
+  if (add && H.isMobile() && V?.panelOpen) closePanel();
 }
 
 // ---------- element management ----------
