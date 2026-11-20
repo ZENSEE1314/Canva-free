@@ -645,3 +645,6 @@ kbd { background: #f1f0f5; border: 1px solid var(--line); border-bottom-width: 2
 .small-note { font-size: 12px; margin: 4px 0 0; }
 @keyframes fxShimmer { to { background-position: -200% 0; } }
 .fx-card { -webkit-touch-callout: none; user-select: none; }
+
+.link-import { display: flex; gap: 6px; margin-top: 10px; }
+.link-import input { flex: 1; min-width: 0; }

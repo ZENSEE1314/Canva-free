@@ -2038,11 +2038,16 @@ async function renderPanel() {
     p.innerHTML = `<h3>Media</h3>
       <button class="btn primary block" id="vImport">${H.icon('upload')} Import videos & photos</button>
       <p class="muted">Or drag files anywhere onto the editor. Click a file to add it to the end of your video.</p>
+      <div class="link-import"><input class="search" id="vLink" type="url" placeholder="Paste a link to a video, photo or audio file" spellcheck="false"><button class="btn ghost small" id="vLinkGo">Add</button></div>
+      <p class="muted small-note" id="vLinkStatus">Works with direct file links (ending in .mp4, .mov, .webm, .mp3, .jpg…).</p>
       <div class="v-media">${items.map(([id, m]) => `<div class="v-media-wrap"><button class="v-media-item" data-mid="${id}" title="Add ${H.esc(m.name)} to the end">${m.thumb ? `<img src="${m.thumb}" alt="">` : ''}<span>${m.type === 'video' ? fmt(m.duration).replace(/\.\d$/, '') : 'Photo'}</span></button><button class="v-pip" data-pip="${id}" title="Add as overlay (picture-in-picture)">PiP</button></div>`).join('') || '<p class="muted">Nothing imported yet.</p>'}</div>
       <p class="muted mt"><b>PiP</b> puts a video or photo on top of your main video — use it for reactions, logos or green-screen clips.</p>
       <h4>Blank clip</h4>
       <div class="row"><input type="color" id="vColorClip" value="#111111"><button class="btn ghost small" id="vAddColor">Add color clip (3s)</button></div>`;
     $('#vImport').onclick = () => $('#vFile').click();
+    const go = () => importFromLink($('#vLink', p).value.trim(), (m) => { const st = $('#vLinkStatus'); if (st) st.textContent = m; });
+    $('#vLinkGo', p).onclick = go;
+    $('#vLink', p).onkeydown = (e) => e.key === 'Enter' && go();
     $$('[data-mid]', p).forEach((b) => (b.onclick = () => {
       const m = V.meta.get(b.dataset.mid);
       addClip(b.dataset.mid, m.type, m.duration);
@@ -2292,6 +2297,107 @@ function templateCard(tpl) {
   return `<button class="vt-card" data-vt="${tpl.id}" style="--tc:${tpl.color}">
     <div class="vt-thumb"><span class="vt-sample">${H.esc(sample.split('\n')[0])}</span><span class="vt-meta">${tpl.slots.length} clips · ${dur.toFixed(0)}s</span></div>
     <b>${H.esc(tpl.name)}</b></button>`;
+}
+
+// ---------- import from a link ----------
+const PAGE_HOSTS = /(^|\.)(tiktok\.com|douyin\.com|youtube\.com|youtu\.be|instagram\.com|facebook\.com|fb\.watch|xiaohongshu\.com|xhslink\.com|bilibili\.com|twitter\.com|x\.com)$/i;
+async function importFromLink(raw, status) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return H.toast('Paste a full link starting with https://');
+  }
+  if (PAGE_HOSTS.test(url.hostname)) {
+    status('That is a page on a social app, not a video file. Save the video from the app first (its Share → Save video option), then import the file here.');
+    return;
+  }
+  status('Downloading…');
+  let blob;
+  try {
+    let r;
+    try {
+      r = await fetch(url.href);
+      if (!r.ok) throw new Error(String(r.status));
+    } catch {
+      // most sites don't allow direct downloads from another page; the Artvas server fetches it instead
+      r = await fetch(`api/image-proxy?url=${encodeURIComponent(url.href)}`);
+    }
+    if (!r.ok) throw new Error(r.status === 413 ? 'That file is over 200 MB.' : r.status === 415 ? "That link isn't a video, photo or audio file." : "Couldn't download that link.");
+    blob = await r.blob();
+  } catch (e) {
+    status(e.message && !/^\d+$/.test(e.message) && !/fetch/i.test(e.message) ? e.message : "Couldn't download that link. Links from your own Artvas site work best.");
+    return;
+  }
+  const ext = (url.pathname.split('.').pop() || '').toLowerCase();
+  let type = blob.type && blob.type !== 'application/octet-stream' ? blob.type : '';
+  if (!type) type = { mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', m4v: 'video/mp4', mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' }[ext] || 'video/mp4';
+  const name = decodeURIComponent(url.pathname.split('/').pop() || 'download') || 'download';
+  await importFiles([new File([blob], name, { type })]);
+  status(`Added ${name}.`);
+}
+
+// ---------- caption files ----------
+const srtTime = (t) => {
+  const ms = Math.max(0, Math.round(t * 1000));
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const sec = Math.floor((ms % 60000) / 1000);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')},${String(ms % 1000).padStart(3, '0')}`;
+};
+function captionList() {
+  return V.p.overlays.filter((o) => o.caption && (o.text || '').trim()).sort((a, b) => a.start - b.start);
+}
+function captionsToSrt(list) {
+  return list.map((o, i) => `${i + 1}\n${srtTime(o.start)} --> ${srtTime(o.start + o.dur)}\n${o.text.trim()}\n`).join('\n');
+}
+function captionsToText(list) {
+  // join caption pieces back into sentences (no spaces between Chinese/Japanese pieces)
+  let out = '';
+  for (const o of list) {
+    const t = o.text.trim().replace(/\n/g, ' ');
+    const cjk = /[　-鿿가-힯]$/.test(out) && /^[　-鿿가-힯]/.test(t);
+    out += out ? (cjk ? '' : ' ') + t : t;
+  }
+  return out;
+}
+function saveTextFile(text, name, type = 'text/plain') {
+  const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }));
+  H.download(url, name);
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+/** Split a transcribed segment into caption pieces of about n words (or ~10 characters for Chinese/Japanese/Thai). */
+function captionPieces(text, n) {
+  const t = text.trim();
+  if (!t) return [];
+  if (!/\s/.test(t) || /[　-鿿]/.test(t)) {
+    const size = n >= 99 ? 16 : Math.max(4, n * 2 + 2);
+    const out = [];
+    for (const part of t.split(/(?<=[，、,。！？!?；;：:])\s*/)) {
+      const clean = part.trim();
+      for (let i = 0; i < clean.length; i += size) out.push(clean.slice(i, i + size));
+    }
+    return out.filter(Boolean);
+  }
+  const words = t.split(/\s+/).filter(Boolean);
+  const size = n || 4;
+  const groups = [];
+  for (let w = 0; w < words.length; w += size) groups.push(words.slice(w, w + size).join(' '));
+  return groups;
+}
+function pushSegments(fresh, segs, at, speed, words) {
+  for (const sg of segs) {
+    const groups = captionPieces(sg.text, words);
+    const t0 = at + sg.start / speed;
+    const t1 = at + sg.end / speed;
+    const total = groups.reduce((a2, g2) => a2 + g2.length, 0) || 1;
+    let cur = t0;
+    groups.forEach((g2) => {
+      const d = ((t1 - t0) * g2.length) / total;
+      fresh.push(captionOverlay(g2, cur, cur + d));
+      cur += d;
+    });
+  }
 }
 
 // ---------- effects & transitions ----------
@@ -2585,20 +2691,25 @@ function captionOverlay(text, start, end) {
 
 function renderCaptionsPanel(p) {
   const n = V.p.overlays.filter((o) => o.caption).length;
-  V.cap = V.cap || { busy: false, status: '', quality: 'fast', lang: '' };
+  V.cap = V.cap || { busy: false, status: '', quality: 'fast', lang: '', audio: true };
   const c = V.cap;
   p.innerHTML = `<h3>Captions</h3>
     <h4>Style</h4>
     <div class="cap-grid">${CAPTION_STYLES.map((cs) => `<button class="cap-item ${cs.id === (V.capStyle || 'box') ? 'on' : ''}" data-cs="${cs.id}" style="font-family:'${cs.st.font}';color:${cs.st.color};${cs.st.bg ? `background:${cs.st.bg};` : 'background:#2a2340;'}${cs.st.stroke ? '-webkit-text-stroke:1px #000;' : ''}${cs.st.glow ? `text-shadow:0 0 8px ${cs.st.glow};background:#1f1235;` : ''}">${cs.label}</button>`).join('')}</div>
     <div class="field mt"><label>Position</label><div class="seg">${['top', 'middle', 'bottom'].map((x) => `<button data-cp="${x}" class="${(V.capPos || 'bottom') === x ? 'on' : ''}">${x}</button>`).join('')}</div></div>
     <div class="ai-fill"><b>Auto captions</b>
-      <p class="muted">Listens to the speech in your clips and writes timed captions. Runs privately in your browser — the first time it downloads a speech model (~40–75 MB).</p>
+      <p class="muted">Listens to the speech in your clips and voice-overs and writes timed captions. Runs privately in your browser — the first time it downloads a speech model (~40–75 MB).</p>
       <div class="grid2"><label>Accuracy<select id="capQ"><option value="fast" ${c.quality === 'fast' ? 'selected' : ''}>Fast</option><option value="accurate" ${c.quality === 'accurate' ? 'selected' : ''}>More accurate</option></select></label>
       <label>Language<select id="capL">${[['', 'Auto-detect'], ['english', 'English'], ['chinese', 'Chinese'], ['malay', 'Malay'], ['indonesian', 'Indonesian'], ['spanish', 'Spanish'], ['japanese', 'Japanese'], ['korean', 'Korean'], ['thai', 'Thai'], ['vietnamese', 'Vietnamese'], ['hindi', 'Hindi'], ['french', 'French']].map(([v, l]) => `<option value="${v}" ${c.lang === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label></div>
-      <label class="row"><input type="checkbox" id="capAudio" ${c.audio ? 'checked' : ''}> Also caption voice-over tracks</label>
+      <label class="row"><input type="checkbox" id="capAudio" ${c.audio ? 'checked' : ''}> Include voice-overs and audio tracks</label>
       <div class="field"><label>Words per caption</label><div class="seg">${[2, 3, 4, 6, 99].map((n) => `<button data-cw="${n}" class="${(c.words || 4) === n ? 'on' : ''}">${n === 99 ? 'Full line' : n}</button>`).join('')}</div></div>
       <button class="btn primary block" id="capAuto" ${c.busy ? 'disabled' : ''}>${H.icon('captions')} ${c.busy ? 'Working…' : 'Generate captions'}</button>
-      <p class="muted" id="capStatus">${H.esc(c.status || '')}</p></div>
+      <p class="muted" id="capStatus">${H.esc(c.status || '')}</p>
+      <button class="btn ghost block" id="capFile" ${c.busy ? 'disabled' : ''}>${H.icon('upload', 14)} Get captions from another video or audio file</button>
+      <p class="muted small-note">Listens to a file without adding it to your video, and puts its words on the timeline from the playhead.</p></div>
+    ${n ? `<h4>Download captions</h4>
+    <div class="row wrap"><button class="btn ghost small" id="capSrt">${H.icon('download', 14)} Subtitles (.srt)</button><button class="btn ghost small" id="capTxt">${H.icon('download', 14)} Text (.txt)</button><button class="btn ghost small" id="capCopy">${H.icon('copy', 14)} Copy text</button></div>
+    <p class="muted small-note">.srt files work with YouTube, Facebook, TikTok Studio and most video players.</p>` : ''}
     <h4>From your script</h4>
     <textarea class="search" id="capScript" rows="5" placeholder="Paste or type what is said. Each line or sentence becomes one caption, spread across the video."></textarea>
     <button class="btn ghost block mt" id="capFromScript">Add captions from script</button>
@@ -2633,18 +2744,47 @@ function renderCaptionsPanel(p) {
   const cl = $('#capClear', p);
   if (cl) cl.onclick = () => { V.p.overlays = V.p.overlays.filter((o) => !o.caption); commit(); renderCaptionsPanel(p); };
   $('#capAuto', p).onclick = () => runAutoCaptions(p);
+  $('#capFile', p).onclick = () => {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = 'video/*,audio/*';
+    inp.onchange = () => inp.files[0] && runAutoCaptions(p, inp.files[0]);
+    inp.click();
+  };
+  const base = () => (V.p.name || 'artvas-video').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') || 'artvas-video';
+  const srt = $('#capSrt', p);
+  if (srt) srt.onclick = () => saveTextFile(captionsToSrt(captionList()), `${base()}.srt`, 'application/x-subrip');
+  const txt = $('#capTxt', p);
+  if (txt) txt.onclick = () => saveTextFile(captionsToText(captionList()), `${base()}-transcript.txt`);
+  const cp = $('#capCopy', p);
+  if (cp) cp.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(captionsToText(captionList()));
+      H.toast('Caption text copied');
+    } catch {
+      H.toast("Couldn't copy — use Text (.txt) instead");
+    }
+  };
 }
 
-async function runAutoCaptions(p) {
+async function runAutoCaptions(p, file) {
   const c = V.cap;
   const status = (m) => { c.status = m; const el = $('#capStatus'); if (el) el.textContent = m; };
   const jobs = [];
   const starts = clipStarts();
-  V.p.clips.forEach((clip, i) => {
-    if (clip.type === 'video' && !clip.muted) jobs.push({ mediaId: clip.mediaId, inSec: clip.in, outSec: clip.out, at: starts[i], speed: clip.speed || 1 });
-  });
-  if (c.audio) V.p.audio.forEach((a) => jobs.push({ mediaId: a.mediaId, inSec: a.in, outSec: a.out, at: a.start, speed: 1 }));
-  if (!jobs.length) return H.toast('Add a video clip with speech first');
+  if (file) {
+    // a file from outside the project: its words start at the playhead (or 0 at the end)
+    jobs.push({ blob: file, inSec: 0, at: V.t >= totalDur() - 0.1 ? 0 : V.t, speed: 1, keep: true });
+  } else {
+    V.p.clips.forEach((clip, i) => {
+      if (clip.type === 'video' && !clip.muted) jobs.push({ mediaId: clip.mediaId, inSec: clip.in, outSec: clip.out, at: starts[i], speed: clip.speed || 1 });
+    });
+    V.p.overlays.forEach((o) => {
+      if (o.type === 'video' && !o.muted) jobs.push({ mediaId: o.mediaId, inSec: o.in || 0, outSec: (o.in || 0) + o.dur, at: o.start, speed: 1 });
+    });
+    if (c.audio) V.p.audio.forEach((a) => { if (!/Artvas Music/.test(a.name || '') && !SFX.some((x) => (a.name || '').startsWith(x.name))) jobs.push({ mediaId: a.mediaId, inSec: a.in, outSec: a.out, at: a.start, speed: 1 }); });
+  }
+  if (!jobs.length) return H.toast('Add a video clip or voice-over with speech first');
   c.busy = true;
   renderCaptionsPanel(p);
   let added = 0;
@@ -2652,33 +2792,26 @@ async function runAutoCaptions(p) {
     const fresh = [];
     for (let j = 0; j < jobs.length; j++) {
       const job = jobs[j];
-      const m = await getMedia(job.mediaId);
-      if (!m) continue;
-      const pre = jobs.length > 1 ? `Clip ${j + 1}/${jobs.length}: ` : '';
-      const segs = await transcribeMedia(m.blob, { inSec: job.inSec, outSec: job.outSec, quality: c.quality, language: c.lang || undefined, onStatus: (s2) => status(pre + s2) });
-      for (const sg of segs) {
-        // short, punchy caption groups (about 4 words) spread across the spoken time
-        const words = sg.text.split(/\s+/).filter(Boolean);
-        const size = c.words || 4;
-        const groups = [];
-        for (let w = 0; w < words.length; w += size) groups.push(words.slice(w, w + size).join(' '));
-        const t0 = job.at + sg.start / job.speed;
-        const t1 = job.at + sg.end / job.speed;
-        const total = groups.reduce((a2, g2) => a2 + g2.length, 0) || 1;
-        let cur = t0;
-        groups.forEach((g2) => {
-          const d = ((t1 - t0) * g2.length) / total;
-          fresh.push(captionOverlay(g2, cur, cur + d));
-          cur += d;
-        });
+      const blob = job.blob || (await getMedia(job.mediaId))?.blob;
+      if (!blob) continue;
+      const pre = jobs.length > 1 ? `Track ${j + 1}/${jobs.length}: ` : '';
+      let segs;
+      try {
+        segs = await transcribeMedia(blob, { inSec: job.inSec, outSec: job.outSec, quality: c.quality, language: c.lang || undefined, onStatus: (s2) => status(pre + s2) });
+      } catch (e) {
+        // a track with no readable sound shouldn't stop the others
+        if (jobs.length > 1 && /no audio track/i.test(e.message || '')) continue;
+        throw e;
       }
+      pushSegments(fresh, segs, job.at, job.speed, c.words || 4);
     }
     if (fresh.length) {
-      V.p.overlays = V.p.overlays.filter((o) => !o.caption).concat(fresh);
+      // a fresh run replaces old captions; captions from an outside file are added alongside them
+      V.p.overlays = (file ? V.p.overlays : V.p.overlays.filter((o) => !o.caption)).concat(fresh);
       added = fresh.length;
       commit();
     }
-    c.status = added ? `Added ${added} captions. Tap one on the timeline to edit its text.` : 'No speech found in your clips.';
+    c.status = added ? `Added ${added} captions. Tap one on the timeline to edit its text.` : file ? 'No speech found in that file.' : 'No speech found in your clips.';
   } catch (e) {
     console.error(e);
     c.status = e.message || 'Auto captions failed.';

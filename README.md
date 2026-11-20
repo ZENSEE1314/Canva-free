@@ -23,7 +23,9 @@ Artvas is a free all-in-one creative studio that runs in the browser. It has a d
 - **Crop and position**: zoom, move, rotate 90° and flip any clip. You can also replace a clip and add a freeze frame.
 - **Picture-in-picture**: put videos or photos on top of the main video, with green-screen (chroma key) removal, volume, circle crop and rotation.
 - **Keyframes**: animate the position, size and opacity of text, stickers and overlays between keyframes.
-- **Captions**: automatic captions from speech (Whisper, running in the browser, auto-detects the language, 2–6 words per caption or full lines), captions from a typed script, and 5 caption styles.
+- **Captions**: automatic captions from speech in your clips, picture-in-picture videos and voice-over tracks (Whisper, running in the browser). It detects the spoken language (English, Chinese, Malay, Indonesian, Tamil, Thai and more) and removes the repeated phrases speech models sometimes invent. Choose 2–6 words per caption or full lines. You can also get captions from any other video or audio file without adding it, write captions from a typed script, and pick from 5 caption styles.
+- **Download captions**: save them as subtitles (.srt, for YouTube, Facebook, TikTok Studio and video players) or as a text transcript (.txt), or copy the text.
+- **Import from a link**: paste a direct link to a video, photo or audio file (the Artvas server fetches it, up to 200 MB). Links to pages on social apps aren't supported; save the video from the app first.
 - **Export**: MP4 (or WebM) at 480p up to full size, with mixed audio. Projects and media are saved in your browser (IndexedDB).
 
 ## Features

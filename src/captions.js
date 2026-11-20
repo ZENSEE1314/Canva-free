@@ -3,12 +3,14 @@
 const TRANSFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6';
 const MODELS = { fast: 'Xenova/whisper-tiny', accurate: 'Xenova/whisper-base' };
 const cache = {};
+let tfLib = null;
 
 async function getASR(quality, onStatus) {
   const id = MODELS[quality] || MODELS.fast;
   if (!cache[id]) {
     cache[id] = (async () => {
       const tf = await import(/* @vite-ignore */ TRANSFORMERS_URL);
+      tfLib = tf;
       tf.env.allowLocalModels = false;
       return tf.pipeline('automatic-speech-recognition', id, {
         progress_callback: (p) => {
@@ -44,6 +46,49 @@ async function toMono16k(blob, inSec = 0, outSec) {
   return out.getChannelData(0);
 }
 
+// Languages Artvas users speak most; the speech model picks the most likely one.
+const DETECT = ['en', 'zh', 'ms', 'id', 'ta', 'th', 'vi', 'tl', 'ja', 'ko', 'hi', 'es', 'fr', 'pt', 'de', 'ar', 'ru', 'it'];
+export const LANG_NAMES = { en: 'English', zh: 'Chinese', ms: 'Malay', id: 'Indonesian', ta: 'Tamil', th: 'Thai', vi: 'Vietnamese', tl: 'Filipino', ja: 'Japanese', ko: 'Korean', hi: 'Hindi', es: 'Spanish', fr: 'French', pt: 'Portuguese', de: 'German', ar: 'Arabic', ru: 'Russian', it: 'Italian' };
+
+/**
+ * Work out the spoken language from the first 30 seconds.
+ * (Left alone, the model assumes English and turns other languages into English or nonsense.)
+ */
+async function detectLanguage(asr, data) {
+  const tf = tfLib;
+  const tok = asr.tokenizer;
+  const id = (t) => tok.model.tokens_to_ids.get(t);
+  const sot = id('<|startoftranscript|>');
+  if (sot == null || !tf) return null;
+  const { input_features } = await asr.processor(data.subarray(0, 16000 * 30));
+  const dec = new tf.Tensor('int64', BigInt64Array.from([BigInt(sot)]), [1, 1]);
+  const out = await asr.model({ input_features, decoder_input_ids: dec });
+  const logits = out.logits.data;
+  let best = null;
+  let bestV = -Infinity;
+  for (const l of DETECT) {
+    const i = id(`<|${l}|>`);
+    if (i == null) continue;
+    if (logits[i] > bestV) {
+      bestV = logits[i];
+      best = l;
+    }
+  }
+  return best;
+}
+
+/** Remove the loops speech models sometimes fall into ("a video of a video of a video…"). */
+export function cleanRepeats(text) {
+  let t = text;
+  for (let k = 0; k < 3; k++) {
+    // a phrase of 1–8 words said 3+ times in a row
+    t = t.replace(/((?:\S+\s+){1,8}?)\1{2,}/g, '$1');
+    // the same for Chinese/Japanese: 1–12 characters repeated 3+ times
+    t = t.replace(/([\u3000-\u9fff\uac00-\ud7af]{1,12}?)\1{2,}/g, '$1');
+  }
+  return t.replace(/\s+/g, ' ').trim();
+}
+
 /**
  * Transcribe part of a media file. Returns [{start, end, text}] in seconds relative to inSec.
  * language: undefined = auto-detect.
@@ -66,12 +111,30 @@ export async function transcribeMedia(blob, { inSec = 0, outSec, quality = 'fast
   } catch {
     throw new Error("Couldn't load the speech model. Auto captions need an internet connection the first time (works on your own Artvas site).");
   }
-  onStatus?.('Listening…');
-  const out = await asr(data, { return_timestamps: true, chunk_length_s: 30, stride_length_s: 5, ...(language ? { language, task: 'transcribe' } : {}) });
+  let lang = language;
+  if (!lang) {
+    onStatus?.('Detecting the language…');
+    try {
+      lang = await detectLanguage(asr, data);
+    } catch (e) {
+      console.warn('language detection failed', e);
+    }
+    if (lang) onStatus?.(`Heard ${LANG_NAMES[lang] || lang}. Listening…`);
+  } else onStatus?.('Listening…');
+  const out = await asr(data, { return_timestamps: true, chunk_length_s: 30, stride_length_s: 5, ...(lang ? { language: lang, task: 'transcribe' } : {}) });
   const chunks = out.chunks?.length ? out.chunks : [{ timestamp: [0, data.length / 16000], text: out.text || '' }];
-  return chunks
-    .map((c) => ({ start: c.timestamp[0] ?? 0, end: c.timestamp[1] ?? (c.timestamp[0] ?? 0) + 2, text: (c.text || '').trim() }))
-    .filter((c) => c.text && !/^\[.*\]$/.test(c.text));
+  const seen = new Map();
+  const segs = chunks
+    .map((c) => ({ start: c.timestamp[0] ?? 0, end: c.timestamp[1] ?? (c.timestamp[0] ?? 0) + 2, text: cleanRepeats((c.text || '').trim()) }))
+    .filter((c) => c.text && !/^[\[(♪].*[\])♪]$/.test(c.text))
+    // the same line coming back again and again is a loop, not speech
+    .filter((c) => {
+      const n = (seen.get(c.text) || 0) + 1;
+      seen.set(c.text, n);
+      return n <= 2;
+    });
+  segs.language = lang || null;
+  return segs;
 }
 
 /** Split text into caption lines (by line breaks, then sentences, then ~7 words). */
