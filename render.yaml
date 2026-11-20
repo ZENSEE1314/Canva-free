@@ -1,0 +1,13 @@
+# One-click deploy on Render (render.com): New → Blueprint, or the "Deploy to Render" link in the README.
+services:
+  - type: web
+    name: artvas
+    runtime: node
+    plan: free
+    branch: ccr-8badd3cf-mv0e8o
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"

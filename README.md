@@ -87,6 +87,12 @@ npm start          # serve dist/ on $PORT (default 3000)
 
 You don't need any environment variables. Railway sets `PORT` automatically.
 
+## Deploy on Render (alternative)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/ZENSEE1314/Canva-free)
+
+Render reads `render.yaml` (free web service, branch `ccr-8badd3cf-mv0e8o`). Free services sleep after 15 minutes without visits, so the first visit after that takes about a minute to wake up.
+
 ## Tech
 
 Vanilla JS, [Fabric.js](https://fabricjs.com) 6, jsPDF, gifenc and Vite, served by a small Express server. The background remover loads [transformers.js](https://github.com/huggingface/transformers.js) from a CDN only when it is first used.
