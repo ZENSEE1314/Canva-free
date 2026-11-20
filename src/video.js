@@ -1428,6 +1428,7 @@ function sizeCanvas() {
   V.ch = Math.round(V.p.height * s);
   V.canvas.width = V.cw;
   V.canvas.height = V.ch;
+  if (V.view && V.view.z !== 1) resetView();
   fitPreview();
 }
 function fitPreview() {
@@ -1466,7 +1467,7 @@ function editorHTML() {
         <div class="panel-body" id="vPanel"></div>
       </aside>
       <section class="workspace">
-        <div class="v-stage" id="vStage"><canvas id="vCanvas"></canvas></div>
+        <div class="v-stage" id="vStage"><canvas id="vCanvas"></canvas><button class="v-zoomchip" id="vViewFit" hidden title="Show the whole video">${H.icon('resize', 14)} <span id="vViewPct">100%</span> · Fit</button></div>
         <div class="v-controls">
           <button class="tool" id="vSplit" title="Split at playhead (S)">${H.icon('scissors')}<span>Split</span></button>
           <button class="tool" id="vDup" title="Duplicate">${H.icon('copy')}</button>
@@ -1573,6 +1574,106 @@ function bindUI() {
   window.addEventListener('resize', sizeCanvas);
   new ResizeObserver(fitPreview).observe($('#vStage'));
   bindPreviewPointer();
+  bindPreviewZoom();
+}
+
+// ---------- preview zoom (pinch / Ctrl+scroll), view only: the video itself is unchanged ----------
+function applyView() {
+  const v = V.view || (V.view = { z: 1, x: 0, y: 0 });
+  if (v.z <= 1.001) {
+    v.z = 1;
+    v.x = 0;
+    v.y = 0;
+  }
+  V.canvas.style.transform = v.z === 1 ? '' : `translate(${v.x}px, ${v.y}px) scale(${v.z})`;
+  const chip = $('#vViewFit');
+  if (chip) {
+    chip.hidden = v.z === 1;
+    $('#vViewPct').textContent = `${Math.round(v.z * 100)}%`;
+  }
+}
+/** Zoom the preview to z, keeping the screen point (mx, my) over the same spot of the video. */
+function zoomViewAt(z, mx, my, panX = 0, panY = 0) {
+  const v = V.view || (V.view = { z: 1, x: 0, y: 0 });
+  const r = V.canvas.getBoundingClientRect();
+  // untransformed centre of the canvas (scaling is about the centre)
+  const cx = r.left + r.width / 2 - v.x;
+  const cy = r.top + r.height / 2 - v.y;
+  const nz = clamp(z, 1, 6);
+  // video point under (mx, my), relative to the centre, before zooming
+  const px = (mx - cx - v.x) / v.z;
+  const py = (my - cy - v.y) / v.z;
+  v.x = mx + panX - cx - nz * px;
+  v.y = my + panY - cy - nz * py;
+  v.z = nz;
+  // don't let the video slide completely off the stage
+  const maxX = (V.canvas.offsetWidth * (nz - 1)) / 2 + 40;
+  const maxY = (V.canvas.offsetHeight * (nz - 1)) / 2 + 40;
+  v.x = clamp(v.x, -maxX, maxX);
+  v.y = clamp(v.y, -maxY, maxY);
+  applyView();
+}
+function resetView() {
+  V.view = { z: 1, x: 0, y: 0 };
+  applyView();
+}
+function bindPreviewZoom() {
+  const stage = $('#vStage');
+  V.view = { z: 1, x: 0, y: 0 };
+  $('#vViewFit').onclick = resetView;
+  stage.addEventListener(
+    'wheel',
+    (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      zoomViewAt(V.view.z * Math.exp(-clamp(e.deltaY, -60, 60) * 0.005), e.clientX, e.clientY);
+    },
+    { passive: false }
+  );
+  let pinch = null;
+  let lastTap = 0;
+  const mid = (ts) => ({ x: (ts[0].clientX + ts[1].clientX) / 2, y: (ts[0].clientY + ts[1].clientY) / 2 });
+  const dist = (ts) => Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY);
+  stage.addEventListener(
+    'touchstart',
+    (e) => {
+      if (e.touches.length === 2) {
+        pinch = { d: dist(e.touches), z: V.view.z, m: mid(e.touches) };
+        V.viewPinch = true;
+      } else if (e.touches.length === 1 && V.view.z > 1) {
+        // double-tap the stage to show the whole video again
+        const now = Date.now();
+        if (now - lastTap < 300) resetView();
+        lastTap = now;
+      }
+    },
+    { capture: true, passive: true }
+  );
+  stage.addEventListener(
+    'touchmove',
+    (e) => {
+      if (e.touches.length !== 2) return;
+      if (!pinch) {
+        pinch = { d: dist(e.touches), z: V.view.z, m: mid(e.touches) };
+        V.viewPinch = true;
+      }
+      e.preventDefault();
+      const m = mid(e.touches);
+      zoomViewAt((pinch.z * dist(e.touches)) / Math.max(10, pinch.d), pinch.m.x, pinch.m.y, m.x - pinch.m.x, m.y - pinch.m.y);
+      pinch.m = m;
+      pinch.z = V.view.z;
+      pinch.d = dist(e.touches);
+    },
+    { capture: true, passive: false }
+  );
+  const end = (e) => {
+    if (e.touches.length < 2 && pinch) {
+      pinch = null;
+      setTimeout(() => V && (V.viewPinch = false), 80);
+    }
+  };
+  stage.addEventListener('touchend', end, { capture: true, passive: true });
+  stage.addEventListener('touchcancel', end, { capture: true, passive: true });
 }
 
 function onKey(e) {
@@ -1595,32 +1696,46 @@ function onKey(e) {
 function bindPreviewPointer() {
   const cv = V.canvas;
   let drag = null;
+  // touch: pick a clip only on a clean tap (a finger may be starting a pinch-zoom)
+  let pendingTap = null;
   const pos = (e) => {
     const r = cv.getBoundingClientRect();
     return { x: ((e.clientX - r.left) / r.width) * V.cw, y: ((e.clientY - r.top) / r.height) * V.ch };
   };
   cv.addEventListener('pointerdown', (e) => {
     const p = pos(e);
+    const touch = e.pointerType === 'touch';
+    pendingTap = null;
     const sel = V.sel?.kind === 'overlay' ? findSel() : null;
     if (sel && V.handle && Math.hypot(p.x - V.handle.x, p.y - V.handle.y) < V.handle.r) {
       const kv = keyed(sel, V.t - sel.start);
-      drag = { mode: 'resize', o: sel, start: p, size: sel.type === 'text' ? kv.size : kv.scale, hit: V.hits.find((h) => h.id === sel.id) };
+      drag = { mode: 'resize', o: sel, start: p, size: sel.type === 'text' ? kv.size : kv.scale, hit: V.hits.find((h) => h.id === sel.id), orig: { x: sel.x, y: sel.y, size: sel.size, scale: sel.scale } };
     } else {
       const hit = [...V.hits].reverse().find((h) => p.x >= h.x && p.x <= h.x + h.w && p.y >= h.y && p.y <= h.y + h.h);
       if (hit) {
         const o = V.p.overlays.find((x) => x.id === hit.id);
-        select({ kind: 'overlay', id: o.id }, { open: true });
+        select({ kind: 'overlay', id: o.id }, { open: !touch });
         const kv = keyed(o, V.t - o.start);
-        drag = { mode: 'move', o, start: p, ox: kv.x, oy: kv.y };
+        drag = { mode: 'move', o, start: p, ox: kv.x, oy: kv.y, tapOpen: touch, cx: e.clientX, cy: e.clientY, orig: { x: o.x, y: o.y, size: o.size, scale: o.scale } };
       } else {
         const act = activeClip(V.t);
-        select(act ? { kind: 'clip', id: act.clip.id } : null, { open: true });
+        const target = act ? { kind: 'clip', id: act.clip.id } : null;
+        if (touch) pendingTap = { x: e.clientX, y: e.clientY, sel: target };
+        else select(target, { open: true });
       }
     }
     if (drag) cv.setPointerCapture(e.pointerId);
   });
   cv.addEventListener('pointermove', (e) => {
+    if (pendingTap && (V.viewPinch || Math.hypot(e.clientX - pendingTap.x, e.clientY - pendingTap.y) > 10)) pendingTap = null;
     if (!drag) return;
+    if (V.viewPinch) {
+      // a pinch started: put the item back where it was and stop dragging it
+      if (!drag.o.keys?.length) Object.assign(drag.o, drag.orig);
+      drag = null;
+      return;
+    }
+    if (drag.tapOpen && Math.hypot(e.clientX - drag.cx, e.clientY - drag.cy) > 8) drag.tapOpen = false;
     const p = pos(e);
     if (drag.mode === 'move') {
       const nx = clamp(drag.ox + (p.x - drag.start.x) / V.cw, -0.2, 1.2);
@@ -1640,10 +1755,16 @@ function bindPreviewPointer() {
       else drag.o[key] = v;
     }
   });
-  const end = () => {
+  const end = (e) => {
+    const pinched = V.viewPinch;
+    if (pendingTap && e.type === 'pointerup' && !pinched) select(pendingTap.sel, { open: true });
+    pendingTap = null;
     if (drag) {
+      const tap = drag.tapOpen && e.type === 'pointerup' && !pinched;
+      const sel = { kind: 'overlay', id: drag.o.id };
       drag = null;
       commit();
+      if (tap) select(sel, { open: true });
     }
   };
   cv.addEventListener('pointerup', end);

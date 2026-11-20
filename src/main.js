@@ -633,6 +633,7 @@ function bindTopbar() {
     },
     { passive: false }
   );
+  bindStagePinch($('#stage'));
   // drag & drop images onto stage
   const stage = $('#stage');
   stage.addEventListener('dragover', (e) => e.preventDefault());
@@ -660,6 +661,76 @@ function bindTopbar() {
 }
 
 // ---------- Zoom ----------
+/**
+ * Phones and tablets: pinch with two fingers to zoom the design around the fingers,
+ * and move both fingers to pan. While two fingers are down, objects can't be grabbed.
+ */
+function bindStagePinch(stage) {
+  let pinch = null;
+  const mid = (ts) => ({ x: (ts[0].clientX + ts[1].clientX) / 2, y: (ts[0].clientY + ts[1].clientY) / 2 });
+  const dist = (ts) => Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY);
+  const start = (e) => {
+    const c = state.canvas;
+    if (!c) return;
+    pinch = { d: dist(e.touches), z: state.zoom, m: mid(e.touches), skip: c.skipTargetFind, sel: c.selection };
+    // the first finger may already have started moving an object: put it back and stop that drag
+    const t = c._currentTransform;
+    if (t?.target && t.original) {
+      const { left, top, scaleX, scaleY, angle, skewX, skewY, flipX, flipY } = t.original;
+      t.target.set(Object.fromEntries(Object.entries({ left, top, scaleX, scaleY, angle, skewX, skewY, flipX, flipY }).filter(([, v]) => v !== undefined)));
+      t.target.setCoords();
+    }
+    c._currentTransform = null;
+    c._groupSelector = null;
+    c.requestRenderAll();
+    // keep the first finger from dragging or selecting while zooming
+    c.skipTargetFind = true;
+    c.selection = false;
+    state.autoFit = false;
+  };
+  stage.addEventListener(
+    'touchstart',
+    (e) => {
+      if (e.touches.length === 2) start(e);
+    },
+    { capture: true, passive: true }
+  );
+  stage.addEventListener(
+    'touchmove',
+    (e) => {
+      if (e.touches.length !== 2) return;
+      if (!pinch) start(e);
+      e.preventDefault();
+      const c = state.canvas;
+      if (!c) return;
+      const m = mid(e.touches);
+      const el = c.lowerCanvasEl;
+      const r0 = el.getBoundingClientRect();
+      const old = state.zoom;
+      // the design point under the fingers stays under the fingers
+      const px = (pinch.m.x - r0.left) / old;
+      const py = (pinch.m.y - r0.top) / old;
+      setZoom((pinch.z * dist(e.touches)) / Math.max(10, pinch.d));
+      const r1 = el.getBoundingClientRect();
+      stage.scrollLeft += r1.left + px * state.zoom - m.x;
+      stage.scrollTop += r1.top + py * state.zoom - m.y;
+      pinch.m = m;
+    },
+    { capture: true, passive: false }
+  );
+  const end = (e) => {
+    if (!pinch || e.touches.length >= 2) return;
+    const c = state.canvas;
+    if (c) {
+      c.skipTargetFind = pinch.skip;
+      c.selection = pinch.sel;
+    }
+    pinch = null;
+  };
+  stage.addEventListener('touchend', end, { capture: true, passive: true });
+  stage.addEventListener('touchcancel', end, { capture: true, passive: true });
+}
+
 function setZoom(z) {
   const c = state.canvas;
   if (!c) return;
