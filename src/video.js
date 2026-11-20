@@ -12,6 +12,7 @@ import { transcribeMedia, scriptToLines } from './captions.js';
 import { MUSIC_STYLES, SFX, renderMusic, renderSfx } from './music.js';
 import { VOICES, speak, ONLINE_LANGS, speakOnline } from './tts.js';
 import { fontsIn } from './fonts.js';
+import { VIDEO_FX, BODY_FX, FX_CATS, COLOR_FX, fxName, applyVideoFx, applyBodyFx, segmentCanvas, loadSegmenter, segState, fxThumb } from './vfx.js';
 
 export const VIDEO_PRESETS = [
   { id: 'tiktok', name: 'TikTok', w: 1080, h: 1920, color: '#111111', hint: '9:16 · up to 10 min' },
@@ -85,7 +86,7 @@ export function applyStarter(project, starterId) {
 }
 
 export function newVideoProject(w, h, name) {
-  return { id: uid(), kind: 'video', name: name || 'Untitled video', width: w, height: h, bg: '#000000', clips: [], overlays: [], audio: [], mediaIds: [], updatedAt: Date.now() };
+  return { id: uid(), kind: 'video', name: name || 'Untitled video', width: w, height: h, bg: '#000000', clips: [], overlays: [], audio: [], effects: [], mediaIds: [], updatedAt: Date.now() };
 }
 
 const FILTERS = [
@@ -101,6 +102,8 @@ const FILTERS = [
 const TRANSITIONS = [
   ['none', 'None'], ['fade', 'Crossfade'], ['black', 'Dip to black'], ['white', 'Flash'], ['slide', 'Slide'], ['up', 'Push up'], ['zoom', 'Zoom'], ['zoomblur', 'Zoom blur'],
   ['wipe', 'Wipe'], ['iris', 'Circle'], ['spin', 'Spin'], ['glitch', 'Glitch'], ['blur', 'Blur'],
+  ['whip', 'Whip pan'], ['down', 'Push down'], ['pixel', 'Pixelate'], ['doors', 'Doors open'], ['blinds', 'Blinds'], ['flip', 'Flip'], ['heart', 'Heart'],
+  ['diag', 'Diagonal wipe'], ['rotate', 'Rotate zoom'], ['rgb', 'RGB split'], ['shakecut', 'Shake cut'],
 ];
 const EFFECTS = [
   ['none', 'None'], ['kb-in', 'Zoom in'], ['kb-out', 'Zoom out'], ['pan', 'Pan'], ['zoompulse', 'Beat pulse'], ['shake', 'Shake'], ['glitch', 'Glitch'],
@@ -666,9 +669,157 @@ function drawClipWithTransition(g, W, Hh, t) {
         drawCur({ blur: b * (1 - p), alpha: p });
         return;
       }
+      case 'whip': {
+        const b = Math.round(Math.min(W, Hh) * 0.03 * Math.sin(Math.PI * p));
+        drawPrev({ dx: -W * p, blur: b });
+        drawCur({ dx: W * (1 - p), blur: b });
+        return;
+      }
+      case 'down':
+        drawPrev({ dy: Hh * p });
+        drawCur({ dy: -Hh * (1 - p) });
+        return;
+      case 'pixel': {
+        const raw = local / tr.dur;
+        if (raw < 0.5) drawPrev();
+        else drawCur();
+        applyVideoFx(g, W, Hh, 'pixel', { local: 0, dur: tr.dur, amt: 0.2 + 2.5 * (1 - Math.abs(raw - 0.5) * 2) });
+        return;
+      }
+      case 'doors':
+        drawCur();
+        [[0, -1], [W / 2, 1]].forEach(([x0, dir]) => {
+          g.save();
+          g.beginPath();
+          g.rect(x0 + dir * (W / 2) * p, 0, W / 2, Hh);
+          g.clip();
+          drawPrev({ dx: dir * (W / 2) * p });
+          g.restore();
+        });
+        return;
+      case 'blinds': {
+        drawPrev();
+        g.save();
+        g.beginPath();
+        const n = 8;
+        for (let i = 0; i < n; i++) g.rect(0, (i * Hh) / n, W, (Hh / n) * p + 1);
+        g.clip();
+        drawCur();
+        g.restore();
+        return;
+      }
+      case 'flip': {
+        const raw = local / tr.dur;
+        const k = Math.max(0.001, Math.abs(Math.cos(Math.PI * raw)));
+        g.save();
+        g.fillStyle = '#000';
+        g.fillRect(0, 0, W, Hh);
+        g.translate(W / 2, 0);
+        g.scale(k, 1);
+        g.translate(-W / 2, 0);
+        if (raw < 0.5) drawPrev();
+        else drawCur();
+        g.restore();
+        return;
+      }
+      case 'heart': {
+        drawPrev();
+        const s = Math.hypot(W, Hh) * 1.6 * p;
+        g.save();
+        g.beginPath();
+        const x = W / 2;
+        const y = Hh / 2 - s * 0.45;
+        g.moveTo(x, y + s * 0.3);
+        g.bezierCurveTo(x, y, x - s * 0.5, y, x - s * 0.5, y + s * 0.3);
+        g.bezierCurveTo(x - s * 0.5, y + s * 0.6, x, y + s * 0.75, x, y + s);
+        g.bezierCurveTo(x, y + s * 0.75, x + s * 0.5, y + s * 0.6, x + s * 0.5, y + s * 0.3);
+        g.bezierCurveTo(x + s * 0.5, y, x, y, x, y + s * 0.3);
+        g.clip();
+        drawCur();
+        g.restore();
+        return;
+      }
+      case 'diag':
+        drawPrev();
+        g.save();
+        g.beginPath();
+        g.moveTo(0, 0);
+        g.lineTo((W + Hh) * 2 * p, 0);
+        g.lineTo(0, (W + Hh) * 2 * p);
+        g.closePath();
+        g.clip();
+        drawCur();
+        g.restore();
+        return;
+      case 'rotate':
+        if (local / tr.dur < 0.5) drawPrev({ rot: p * 0.6, scale: 1 + p * 1.2, alpha: 1 - p * 0.5 });
+        else drawCur({ rot: -(1 - p) * 0.6, scale: 1 + (1 - p) * 1.2, alpha: 0.5 + p * 0.5 });
+        return;
+      case 'rgb': {
+        const raw = local / tr.dur;
+        if (raw < 0.5) drawPrev();
+        else drawCur();
+        applyVideoFx(g, W, Hh, 'rgb', { local: 0.26, dur: tr.dur, amt: 3 * (1 - Math.abs(raw - 0.5) * 2) });
+        return;
+      }
+      case 'shakecut': {
+        const raw = local / tr.dur;
+        const k = 1 - Math.abs(raw - 0.5) * 2;
+        const o = { dx: Math.sin(local * 80) * W * 0.04 * k, dy: Math.cos(local * 70) * Hh * 0.03 * k, scale: 1 + 0.1 * k };
+        if (raw < 0.5) drawPrev(o);
+        else drawCur(o);
+        if (Math.abs(raw - 0.5) < 0.12) {
+          g.save();
+          g.globalAlpha = 0.6;
+          g.fillStyle = '#fff';
+          g.fillRect(0, 0, W, Hh);
+          g.restore();
+        }
+        return;
+      }
     }
   }
   drawCur();
+}
+
+/** Effect layers (video & body effects) that cover time t, applied to the picture under them. */
+function applyEffectLayers(g, W, Hh, t, preview) {
+  const list = (V.p.effects || []).filter((e) => t >= e.start && t < e.start + e.dur);
+  if (!list.length) return;
+  let mask;
+  for (const e of list) {
+    const o = { local: t - e.start, dur: e.dur, amt: e.amount ?? 1, color: e.color };
+    if (e.kind === 'body') {
+      if (mask === undefined) mask = frameMask(g, t);
+      if (mask) applyBodyFx(g, W, Hh, e.fx, o, mask);
+      else if (preview) {
+        const st = segState();
+        g.save();
+        g.fillStyle = 'rgba(0,0,0,.55)';
+        const m = Math.min(W, Hh);
+        g.font = `600 ${Math.round(m * 0.035)}px "DM Sans", sans-serif`;
+        const msg = st === 'error' ? 'Body effects need internet the first time (your Artvas site)' : 'Loading body effects…';
+        const tw = g.measureText(msg).width;
+        g.fillRect((W - tw) / 2 - m * 0.03, Hh * 0.06, tw + m * 0.06, m * 0.07);
+        g.fillStyle = '#fff';
+        g.textAlign = 'center';
+        g.textBaseline = 'middle';
+        g.fillText(msg, W / 2, Hh * 0.06 + m * 0.035);
+        g.restore();
+      }
+    } else applyVideoFx(g, W, Hh, e.fx, o);
+  }
+}
+/** Person mask for the current frame; found once per frame and shared by preview and export. */
+function frameMask(g, t) {
+  const live = V.playing || V.exporting;
+  const key = live ? `${t}|${V.rev || 0}` : `${t}|${V.rev || 0}|${Math.floor(performance.now() / 300)}`;
+  if (V.maskKey === key) return V.mask;
+  const mk = segmentCanvas(g.canvas);
+  if (!mk) return null;
+  V.maskKey = key;
+  V.mask = mk;
+  return mk;
 }
 
 function animState(o, t) {
@@ -852,6 +1003,7 @@ function renderFrame(g, W, Hh, t, { preview = false } = {}) {
   g.fillStyle = V.p.bg || '#000';
   g.fillRect(0, 0, W, Hh);
   drawClipWithTransition(g, W, Hh, t);
+  applyEffectLayers(g, W, Hh, t, preview);
   const hits = preview ? [] : null;
   drawOverlays(g, W, Hh, t, hits);
   g.restore();
@@ -904,6 +1056,10 @@ function loop(ts) {
         setPlaying(false);
       }
     }
+  }
+  if (V.playing && V.stopAt != null && !V.exporting && V.t >= V.stopAt) {
+    V.stopAt = null;
+    setPlaying(false);
   }
   sync(V.t, V.playing);
   renderFrame(V.g, V.cw, V.ch, V.t, { preview: true });
@@ -993,13 +1149,13 @@ function addText(preset) {
 }
 function findSel() {
   if (!V.sel) return null;
-  const list = V.sel.kind === 'clip' ? V.p.clips : V.sel.kind === 'overlay' ? V.p.overlays : V.p.audio;
+  const list = V.sel.kind === 'clip' ? V.p.clips : V.sel.kind === 'overlay' ? V.p.overlays : V.sel.kind === 'effect' ? V.p.effects : V.p.audio;
   return list.find((x) => x.id === V.sel.id) || null;
 }
 function deleteSel() {
   const s = findSel();
   if (!s) return;
-  const key = V.sel.kind === 'clip' ? 'clips' : V.sel.kind === 'overlay' ? 'overlays' : 'audio';
+  const key = V.sel.kind === 'clip' ? 'clips' : V.sel.kind === 'overlay' ? 'overlays' : V.sel.kind === 'effect' ? 'effects' : 'audio';
   V.p[key] = V.p[key].filter((x) => x !== s);
   V.sel = null;
   prepareAll();
@@ -1011,6 +1167,7 @@ function duplicateSel() {
   const c = { ...structuredClone(s), id: uid() };
   if (V.sel.kind === 'clip') V.p.clips.splice(V.p.clips.indexOf(s) + 1, 0, c);
   else if (V.sel.kind === 'overlay') { c.start = s.start + s.dur; V.p.overlays.push(c); }
+  else if (V.sel.kind === 'effect') { c.start = s.start + s.dur; V.p.effects.push(c); }
   else { c.start = s.start + (s.out - s.in); V.p.audio.push(c); }
   V.sel = { kind: V.sel.kind, id: c.id };
   prepareAll();
@@ -1041,12 +1198,12 @@ function splitAtPlayhead() {
       s.out = cut;
     }
     V.p.clips.splice(i + 1, 0, b);
-  } else if (kind === 'overlay') {
+  } else if (kind === 'overlay' || kind === 'effect') {
     const local = t - s.start;
     if (local < 0.1 || local > s.dur - 0.1) return H.toast('Move the playhead inside the item to split it');
     const b = { ...structuredClone(s), id: uid(), start: t, dur: s.dur - local };
     s.dur = local;
-    V.p.overlays.push(b);
+    (kind === 'effect' ? V.p.effects : V.p.overlays).push(b);
   } else {
     const local = t - s.start;
     if (local < 0.1 || local > s.out - s.in - 0.1) return H.toast('Move the playhead inside the audio to split it');
@@ -1141,6 +1298,7 @@ function snapshot() {
   return JSON.stringify(rest);
 }
 function commit({ history = true } = {}) {
+  V.rev = (V.rev || 0) + 1;
   if (history) {
     const s = snapshot();
     if (V.hist[V.hist.length - 1] !== s) {
@@ -1155,7 +1313,7 @@ function commit({ history = true } = {}) {
 }
 function restore(s) {
   const keep = { id: V.p.id, thumb: V.p.thumb };
-  V.p = { ...JSON.parse(s), ...keep };
+  V.p = { effects: [], ...JSON.parse(s), ...keep };
   if (V.sel && !findSel()) V.sel = null;
   prepareAll();
   renderTimeline();
@@ -1210,6 +1368,8 @@ const TABS = [
   ['templates', 'layout', 'Templates'],
   ['media', 'upload', 'Media'],
   ['text', 'type', 'Text'],
+  ['effects', 'sparkle', 'Effects'],
+  ['transitions', 'transition', 'Transitions'],
   ['captions', 'captions', 'Captions'],
   ['elements', 'shapes', 'Elements'],
   ['audio', 'music', 'Audio'],
@@ -1220,6 +1380,7 @@ const TABS = [
 export async function openVideoEditor(project, helpers, opts = {}) {
   H = helpers;
   closeVideoEditor();
+  if (!Array.isArray(project.effects)) project.effects = [];
   V = {
     p: project, t: 0, playing: false, sel: null, els: new Map(), aels: new Map(), oels: new Map(), urls: new Map(), meta: new Map(),
     pps: 60, hist: [], redo: [], tab: opts.tab || (project.clips.some((c) => c.slot) ? 'templates' : 'media'), panelOpen: !H.isMobile() || !!opts.tab, inspectorOpen: false, hits: [], last: 0,
@@ -1310,12 +1471,16 @@ function editorHTML() {
           <button class="tool" id="vFwd" title="Forward 1 second">${H.icon('chevRight')}</button>
           <span class="v-time" id="vTime">00:00.0 / 00:00.0</span>
           <span class="spacer"></span>
-          <button class="tool" id="vZoomOut" title="Zoom timeline out">${H.icon('minus')}</button>
-          <button class="tool" id="vZoomIn" title="Zoom timeline in">${H.icon('plus')}</button>
           <button class="tool ctx-toggle" id="vInspToggle" title="Edit selected">${H.icon('resize')}<span>Edit</span></button>
         </div>
         <div class="tl" id="tl">
           <div class="tl-scroll" id="tlScroll"><div class="tl-inner" id="tlInner"></div></div>
+          <div class="tl-zoom" title="Zoom the timeline (pinch, or Ctrl + scroll)">
+            <button id="vZoomOut" title="Zoom out — see the whole video">${H.icon('minus', 14)}</button>
+            <input type="range" id="vZoom" min="0" max="100" step="1" aria-label="Timeline zoom">
+            <button id="vZoomIn" title="Zoom in — see more detail">${H.icon('plus', 14)}</button>
+            <button id="vZoomFit" class="fit" title="Fit the whole video">Fit</button>
+          </div>
         </div>
       </section>
       <aside class="props" id="propsWrap">
@@ -1359,14 +1524,13 @@ function bindUI() {
     scheduleSave();
   };
   $('#vExport').onclick = openExport;
-  $('#vPlay').onclick = () => setPlaying(!V.playing);
+  $('#vPlay').onclick = () => { V.stopAt = null; setPlaying(!V.playing); };
   $('#vBack').onclick = () => seek(V.t - 1);
   $('#vFwd').onclick = () => seek(V.t + 1);
   $('#vSplit').onclick = splitAtPlayhead;
   $('#vDup').onclick = duplicateSel;
   $('#vDel').onclick = deleteSel;
-  $('#vZoomIn').onclick = () => { V.pps = Math.min(400, V.pps * 1.4); renderTimeline(); };
-  $('#vZoomOut').onclick = () => { V.pps = Math.max(8, V.pps / 1.4); renderTimeline(); };
+  bindTimelineZoom();
   // "Edit" toggles the right panel; with nothing selected it shows the video settings
   $('#vInspToggle').onclick = () => {
     V.inspectorOpen = !V.inspectorOpen;
@@ -1497,11 +1661,151 @@ function lanes(items, endOf) {
   return { out, count: laneEnds.length };
 }
 
+const PPS_MIN = 4;
+const PPS_MAX = 600;
+// slider position (0–100) <-> pixels per second, on a log scale
+const ppsToZ = (pps) => Math.round((Math.log(pps / PPS_MIN) / Math.log(PPS_MAX / PPS_MIN)) * 100);
+const zToPps = (z) => PPS_MIN * Math.pow(PPS_MAX / PPS_MIN, z / 100);
 function fitTimeline() {
   const sc = $('#tlScroll');
   if (!sc) return;
-  const w = sc.clientWidth - 80;
-  V.pps = clamp(w / Math.max(5, totalDur() + 2), 12, 200);
+  const w = sc.clientWidth - 40;
+  V.pps = clamp(w / Math.max(1, totalDur() + 0.5), PPS_MIN, 200);
+  syncZoomUI();
+}
+function syncZoomUI() {
+  const z = $('#vZoom');
+  if (z) z.value = ppsToZ(V.pps);
+}
+/** Zoom the timeline, keeping the time under anchorX (or the playhead) in place. */
+function setTimelineZoom(pps, anchorX, { live = false } = {}) {
+  const sc = $('#tlScroll');
+  if (!sc || !V) return;
+  const old = V.pps;
+  pps = clamp(pps, PPS_MIN, PPS_MAX);
+  if (Math.abs(pps - old) < 0.01) return;
+  const r = sc.getBoundingClientRect();
+  let ax = anchorX;
+  if (ax == null) {
+    const px = V.t * old - sc.scrollLeft;
+    ax = r.left + (px >= 0 && px <= sc.clientWidth ? px : sc.clientWidth / 2);
+  }
+  const tAt = (sc.scrollLeft + ax - r.left) / old;
+  V.pps = pps;
+  if (live) relayoutTimeline();
+  else renderTimeline();
+  sc.scrollLeft = Math.max(0, tAt * pps - (ax - r.left));
+  syncZoomUI();
+}
+/** Resize the timeline in place (used while pinching, so the touched element is not replaced). */
+function relayoutTimeline() {
+  const inner = $('#tlInner');
+  if (!inner) return;
+  const pps = V.pps;
+  const total = totalDur();
+  inner.style.width = `${Math.max((total + 6) * pps, ($('#tlScroll')?.clientWidth || 600) - 10)}px`;
+  const step = pps > 150 ? 0.5 : pps > 90 ? 1 : pps > 40 ? 2 : pps > 18 ? 5 : pps > 8 ? 10 : 30;
+  let ticks = '';
+  for (let x = 0; x <= total + 6; x += step) ticks += `<span class="tl-tick" style="left:${x * pps}px">${step < 1 ? fmt(x) : fmt(x).replace(/\.\d$/, '')}</span>`;
+  const ruler = $('#tlRuler', inner);
+  if (ruler) ruler.innerHTML = ticks;
+  const starts = clipStarts();
+  const place = (id, start, dur) => {
+    const el = inner.querySelector(`.tl-block[data-id="${id}"]`);
+    if (el) {
+      el.style.left = `${start * pps}px`;
+      el.style.width = `${Math.max(6, dur * pps - 2)}px`;
+    }
+  };
+  V.p.clips.forEach((c, i) => place(c.id, starts[i], clipDur(c)));
+  [...V.p.overlays, ...(V.p.effects || [])].forEach((o) => place(o.id, o.start, o.dur));
+  V.p.audio.forEach((a) => place(a.id, a.start, a.out - a.in));
+  $$('.tl-junc', inner).forEach((b) => (b.style.left = `${starts[+b.dataset.junc] * pps - 11}px`));
+  const ph = $('#tlPlayhead', inner);
+  if (ph) ph.style.transform = `translateX(${V.t * pps}px)`;
+}
+function bindTimelineZoom() {
+  $('#vZoomIn').onclick = () => setTimelineZoom(V.pps * 1.5);
+  $('#vZoomOut').onclick = () => setTimelineZoom(V.pps / 1.5);
+  $('#vZoomFit').onclick = () => {
+    fitTimeline();
+    renderTimeline();
+    $('#tlScroll').scrollLeft = 0;
+  };
+  $('#vZoom').oninput = (e) => setTimelineZoom(zToPps(+e.target.value));
+  const sc = $('#tlScroll');
+  // Ctrl/Cmd + wheel and trackpad pinch (which arrives as ctrl + wheel)
+  sc.addEventListener(
+    'wheel',
+    (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      e.preventDefault();
+      setTimelineZoom(V.pps * Math.exp(-clamp(e.deltaY, -60, 60) * 0.004), e.clientX);
+    },
+    { passive: false }
+  );
+  bindPinch();
+}
+
+// Two-finger pinch on the timeline. Listens on the whole page: the second finger may land on
+// something else (a sheet, a button), and the element under the first finger may be redrawn.
+let pinchBound = false;
+function bindPinch() {
+  if (pinchBound) return;
+  pinchBound = true;
+  let pinch = null;
+  let fromTimeline = false;
+  const dist = (ts) => Math.hypot(ts[0].clientX - ts[1].clientX, ts[0].clientY - ts[1].clientY);
+  const inTimeline = (touch) => {
+    const sc = document.getElementById('tlScroll');
+    if (!sc) return false;
+    const r = sc.getBoundingClientRect();
+    return touch.clientX >= r.left && touch.clientX <= r.right && touch.clientY >= r.top && touch.clientY <= r.bottom;
+  };
+  document.addEventListener(
+    'touchstart',
+    (e) => {
+      if (!V) return;
+      V.touches = e.touches.length;
+      if (e.touches.length === 1) fromTimeline = inTimeline(e.touches[0]);
+      if (e.touches.length === 2 && (fromTimeline || inTimeline(e.touches[1]))) {
+        pinch = { d: dist(e.touches), pps: V.pps };
+        V.pinching = true;
+      }
+    },
+    { capture: true, passive: true }
+  );
+  document.addEventListener(
+    'touchmove',
+    (e) => {
+      if (!V || e.touches.length !== 2) return;
+      if (!pinch) {
+        if (!fromTimeline && !inTimeline(e.touches[0])) return;
+        pinch = { d: dist(e.touches), pps: V.pps };
+        V.pinching = true;
+      }
+      e.preventDefault();
+      const mid = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+      setTimelineZoom((pinch.pps * dist(e.touches)) / Math.max(10, pinch.d), mid, { live: true });
+    },
+    { capture: true, passive: false }
+  );
+  const end = (e) => {
+    if (!V) return;
+    V.touches = e.touches.length;
+    if (e.touches.length < 2 && pinch) {
+      pinch = null;
+      V.pinchEnd = Date.now();
+      setTimeout(() => {
+        if (!V) return;
+        V.pinching = false;
+        renderTimeline();
+      }, 60);
+    }
+    if (!e.touches.length) fromTimeline = false;
+  };
+  document.addEventListener('touchend', end, { capture: true, passive: true });
+  document.addEventListener('touchcancel', end, { capture: true, passive: true });
 }
 
 function renderTimeline() {
@@ -1513,15 +1817,16 @@ function renderTimeline() {
   const starts = clipStarts();
   const ov = lanes(V.p.overlays, (o) => o.dur);
   const au = lanes(V.p.audio, (a) => a.out - a.in);
-  const step = pps > 90 ? 1 : pps > 40 ? 2 : pps > 18 ? 5 : 10;
+  const fx = lanes(V.p.effects || [], (e) => e.dur);
+  const step = pps > 150 ? 0.5 : pps > 90 ? 1 : pps > 40 ? 2 : pps > 18 ? 5 : pps > 8 ? 10 : 30;
   let ticks = '';
-  for (let s = 0; s <= total + 6; s += step) ticks += `<span class="tl-tick" style="left:${s * pps}px">${fmt(s).replace(/\.\d$/, '')}</span>`;
+  for (let s = 0; s <= total + 6; s += step) ticks += `<span class="tl-tick" style="left:${s * pps}px">${step < 1 ? fmt(s) : fmt(s).replace(/\.\d$/, '')}</span>`;
   const isSel = (kind, id) => V.sel?.kind === kind && V.sel.id === id;
   const clipBlocks = V.p.clips
     .map((c, i) => {
       const m = V.meta.get(c.mediaId) || {};
       const d = clipDur(c);
-      const tr = c.transition?.type && c.transition.type !== 'none' && i > 0 ? `<span class="tl-tr" title="Transition: ${c.transition.type}">⧓</span>` : '';
+      const tr = '';
       const bg = c.type === 'color' ? `background:${c.color}` : m.thumb ? `background-image:url(${m.thumb})` : '';
       const name = c.type === 'color' ? (c.slot ? `Clip ${c.slot}` : 'Color') : m.name || c.type;
       return `<div class="tl-block clip ${isSel('clip', c.id) ? 'sel' : ''}" data-kind="clip" data-id="${c.id}" style="left:${starts[i] * pps}px;width:${Math.max(6, d * pps - 2)}px;${bg}">
@@ -1532,6 +1837,19 @@ function renderTimeline() {
     .map(([o, l]) => `<div class="tl-block ov ${o.type} ${isSel('overlay', o.id) ? 'sel' : ''}" data-kind="overlay" data-id="${o.id}" style="left:${o.start * pps}px;width:${Math.max(6, o.dur * pps - 2)}px;top:${l * 30}px">
       <span class="tl-label">${o.type === 'text' ? (o.caption ? 'CC ' : 'T  ') + H.esc((o.text || '').split('\n')[0]) : o.type === 'video' ? '▶ Video overlay' : o.emoji || 'Image'}${o.keys?.length ? ' ◆' : ''}</span><i class="h-l"></i><i class="h-r"></i></div>`)
     .join('');
+  const juncs = V.p.clips
+    .slice(1)
+    .map((c, j) => {
+      const i = j + 1;
+      const has = c.transition?.type && c.transition.type !== 'none';
+      const name = has ? (TRANSITIONS.find(([id]) => id === c.transition.type) || [, c.transition.type])[1] : 'Add transition';
+      return `<button class="tl-junc ${has ? 'on' : ''} ${V.tab === 'transitions' && V.trIdx === i && V.panelOpen ? 'cur' : ''}" data-junc="${i}" style="left:${starts[i] * pps - 11}px" title="${H.esc(name)}">${H.icon(has ? 'transition' : 'plus', 12)}</button>`;
+    })
+    .join('');
+  const fxBlocks = fx.out
+    .map(([e, l]) => `<div class="tl-block fx ${e.kind === 'body' ? 'body' : ''} ${isSel('effect', e.id) ? 'sel' : ''}" data-kind="effect" data-id="${e.id}" style="left:${e.start * pps}px;width:${Math.max(6, e.dur * pps - 2)}px;top:${l * 30}px">
+      <span class="tl-label">${e.kind === 'body' ? '☺' : '✦'} ${H.esc(fxName(e.fx))}</span><i class="h-l"></i><i class="h-r"></i></div>`)
+    .join('');
   const auBlocks = au.out
     .map(([a, l]) => `<div class="tl-block au ${isSel('audio', a.id) ? 'sel' : ''}" data-kind="audio" data-id="${a.id}" style="left:${a.start * pps}px;width:${Math.max(6, (a.out - a.in) * pps - 2)}px;top:${l * 30}px">
       <span class="tl-label">♪ ${H.esc(a.name || 'Audio')}</span><i class="h-l"></i><i class="h-r"></i></div>`)
@@ -1539,8 +1857,9 @@ function renderTimeline() {
   inner.style.width = `${width}px`;
   inner.innerHTML = `
     <div class="tl-ruler" id="tlRuler">${ticks}</div>
+    ${fx.count ? `<div class="tl-row tl-fx" style="height:${fx.count * 30}px">${fxBlocks}</div>` : ''}
     <div class="tl-row tl-ov" style="height:${Math.max(1, ov.count) * 30 + 6}px">${ovBlocks || '<span class="tl-empty">Text & stickers</span>'}</div>
-    <div class="tl-row tl-main">${clipBlocks || '<span class="tl-empty">Drop videos & photos here</span>'}</div>
+    <div class="tl-row tl-main">${clipBlocks || '<span class="tl-empty">Drop videos & photos here</span>'}${juncs}</div>
     <div class="tl-row tl-au" style="height:${Math.max(1, au.count) * 30 + 6}px">${auBlocks || '<span class="tl-empty">Music & voice-over</span>'}</div>
     <div class="tl-playhead" id="tlPlayhead" style="transform:translateX(${V.t * pps}px)"><i></i></div>`;
   bindTimeline(inner);
@@ -1553,8 +1872,31 @@ function bindTimeline(inner) {
     return (clientX - r.left) / pps;
   };
   // seek on ruler / empty area
+  $$('.tl-junc', inner).forEach((b) => {
+    b.onpointerdown = (e) => e.stopPropagation();
+    b.onclick = (e) => {
+      e.stopPropagation();
+      openTransitions(+b.dataset.junc);
+    };
+  });
   inner.onpointerdown = (e) => {
-    if (e.target.closest('.tl-block')) return;
+    if (e.target.closest('.tl-block') || e.target.closest('.tl-junc') || V.pinching) return;
+    if (e.pointerType === 'touch') {
+      // touch: a tap moves the playhead; a drag scrolls; two fingers zoom. Act only on a clean tap,
+      // so the timeline isn't redrawn under a finger that may be starting a pinch.
+      const x0 = e.clientX;
+      const y0 = e.clientY;
+      const onRuler = !!e.target.closest('.tl-ruler');
+      const up = (ev) => {
+        window.removeEventListener('pointerup', up);
+        if (!V || V.pinching || V.touches > 1 || Date.now() - (V.pinchEnd || 0) < 400) return;
+        if (Math.hypot(ev.clientX - x0, ev.clientY - y0) > 10) return;
+        seek(x2t(ev.clientX));
+        if (!onRuler) select(null);
+      };
+      window.addEventListener('pointerup', up);
+      return;
+    }
     seek(x2t(e.clientX));
     const move = (ev) => seek(x2t(ev.clientX));
     const up = () => {
@@ -1575,7 +1917,7 @@ function bindTimeline(inner) {
         renderInspector();
         $$('.tl-block.sel', inner).forEach((x) => x.classList.remove('sel'));
         b.classList.add('sel');
-        if (H.isMobile() || (!V.inspClosedByUser && !V.inspectorOpen)) openInspector();
+        if (!H.isMobile() && !V.inspClosedByUser && !V.inspectorOpen) openInspector();
       }
       const item = findSel();
       const mode = e.target.classList.contains('h-l') ? 'l' : e.target.classList.contains('h-r') ? 'r' : 'm';
@@ -1585,6 +1927,15 @@ function bindTimeline(inner) {
       let moved = false;
       b.setPointerCapture(e.pointerId);
       b.onpointermove = (ev) => {
+        if (V.pinching || V.touches > 1) {
+          if (moved) {
+            Object.assign(item, structuredClone(orig));
+            moved = false;
+            b.style.transform = '';
+            b.classList.remove('dragging');
+          }
+          return;
+        }
         const dt = (ev.clientX - x0) / pps;
         if (Math.abs(ev.clientX - x0) > 3) moved = true;
         if (!moved) return;
@@ -1601,7 +1952,7 @@ function bindTimeline(inner) {
           } else {
             item.out = clamp(orig.out + dt * (item.speed || 1), item.in + 0.2, meta.duration || orig.out);
           }
-        } else if (kind === 'overlay') {
+        } else if (kind === 'overlay' || kind === 'effect') {
           if (mode === 'm') item.start = Math.max(0, orig.start + dt);
           else if (mode === 'l') {
             const ns = clamp(orig.start + dt, 0, orig.start + orig.dur - 0.2);
@@ -1621,6 +1972,12 @@ function bindTimeline(inner) {
       b.onpointerup = (ev) => {
         b.onpointermove = null;
         b.onpointerup = null;
+        const pinched = V.pinching || V.touches > 1 || Date.now() - (V.pinchEnd || 0) < 400;
+        if (pinched) {
+          if (moved) Object.assign(item, structuredClone(orig));
+          renderTimeline();
+          return;
+        }
         if (kind === 'clip' && mode === 'm' && moved) {
           // reorder: drop position decides new index
           const t = x2t(ev.clientX);
@@ -1633,11 +1990,12 @@ function bindTimeline(inner) {
           V.p.clips.splice(to, 0, item);
         }
         if (moved) commit();
-        else if (kind === 'clip' || kind === 'overlay' || kind === 'audio') {
+        else if (kind === 'clip' || kind === 'overlay' || kind === 'audio' || kind === 'effect') {
           // a click selects and seeks into the item
           const t = x2t(ev.clientX);
           seek(t);
           renderTimeline();
+          if (H.isMobile()) openInspector();
         }
       };
     };
@@ -1659,7 +2017,7 @@ function renderTimelineLive() {
         if (lb) lb.textContent = `${(V.meta.get(c.mediaId) || {}).name || c.type} · ${clipDur(c).toFixed(1)}s`;
       }
     });
-    V.p.overlays.forEach((o) => {
+    [...V.p.overlays, ...(V.p.effects || [])].forEach((o) => {
       const el = $(`.tl-block[data-id="${o.id}"]`);
       if (el) { el.style.left = `${o.start * pps}px`; el.style.width = `${Math.max(6, o.dur * pps - 2)}px`; }
     });
@@ -1741,6 +2099,8 @@ async function renderPanel() {
   } else if (tab === 'ai') renderAIPanel(p);
   else if (tab === 'templates') renderTemplatesPanel(p);
   else if (tab === 'captions') renderCaptionsPanel(p);
+  else if (tab === 'effects') renderEffectsPanel(p);
+  else if (tab === 'transitions') renderTransitionsPanel(p);
 }
 
 // ---------- Audio panel: music library, sound effects, text to speech ----------
@@ -1932,6 +2292,179 @@ function templateCard(tpl) {
   return `<button class="vt-card" data-vt="${tpl.id}" style="--tc:${tpl.color}">
     <div class="vt-thumb"><span class="vt-sample">${H.esc(sample.split('\n')[0])}</span><span class="vt-meta">${tpl.slots.length} clips · ${dur.toFixed(0)}s</span></div>
     <b>${H.esc(tpl.name)}</b></button>`;
+}
+
+// ---------- effects & transitions ----------
+/** Play a short stretch so a newly applied effect or transition is seen right away. */
+function previewRange(from, to) {
+  seek(Math.max(0, from));
+  V.stopAt = Math.min(totalDur(), to);
+  setPlaying(true);
+  V.stopAt = Math.min(totalDur(), to);
+}
+function addEffectLayer(kind, id) {
+  const cur = findSel();
+  if (V.sel?.kind === 'effect' && cur && cur.kind === kind) {
+    cur.fx = id;
+    if (COLOR_FX[id] && !cur.color) cur.color = COLOR_FX[id];
+    commit();
+    if (kind === 'body') warmSegmenter();
+    previewRange(cur.start, cur.start + Math.min(cur.dur, 2.5));
+    return;
+  }
+  const total = totalDur();
+  const start = V.t >= total - 0.1 ? 0 : V.t;
+  const act = activeClip(start);
+  let dur = kind === 'body' && act ? act.start + clipDur(act.clip) - start : 3;
+  if (V.p.clips.length) dur = Math.min(dur, mainDur() - start);
+  dur = Math.max(1, dur);
+  const e = { id: uid(), kind, fx: id, start, dur, amount: 1 };
+  if (COLOR_FX[id]) e.color = COLOR_FX[id];
+  V.p.effects.push(e);
+  select({ kind: 'effect', id: e.id });
+  commit();
+  if (kind === 'body') warmSegmenter();
+  if (H.isMobile()) closePanel();
+  previewRange(start, start + Math.min(dur, 2.5));
+  H.toast(`${fxName(id)} added — drag its ends on the timeline to change how long it lasts`);
+}
+function warmSegmenter() {
+  if (segState() === 'ready') return;
+  loadSegmenter()
+    .then(() => {
+      if (!V) return;
+      if (V.tab === 'effects') renderPanel();
+      renderInspector();
+    })
+    .catch(() => {
+      if (!V) return;
+      H.toast("Couldn't load body effects. They need an internet connection the first time (works on your own Artvas site).");
+      if (V.tab === 'effects') renderPanel();
+    });
+}
+function segStatusText() {
+  const st = segState();
+  return st === 'ready' ? 'Person detection is ready.' : st === 'loading' ? 'Loading person detection (about 3 MB, once)…' : st === 'error' ? "Person detection couldn't load. It needs internet the first time (works on your own Artvas site)." : 'Finds the person in your video automatically. Runs on your device.';
+}
+function renderEffectsPanel(p) {
+  const sec = V.fxSec || 'video';
+  const cat = V.fxCat || 'All';
+  const sel = V.sel?.kind === 'effect' ? findSel() : null;
+  const list = sec === 'body' ? BODY_FX : VIDEO_FX.filter((f) => cat === 'All' || f.cat === cat);
+  p.innerHTML = `<h3>Effects</h3>
+    <div class="seg full"><button data-fsec="video" class="${sec === 'video' ? 'on' : ''}">${H.icon('sparkle', 14)} Video effects</button><button data-fsec="body" class="${sec === 'body' ? 'on' : ''}">${H.icon('person', 14)} Body effects</button></div>
+    ${sec === 'video'
+      ? `<div class="chips mt">${FX_CATS.map((c) => `<button class="chip ${c === cat ? 'on' : ''}" data-fcat="${c}">${c}</button>`).join('')}</div>`
+      : `<p class="muted mt" id="segStatus">${segStatusText()}</p>`}
+    ${sel ? `<p class="fx-hint">Tap an effect to replace <b>${H.esc(fxName(sel.fx))}</b>. <button class="linkish" id="fxNew">Add a new layer instead</button></p>` : `<p class="muted">Tap an effect to add it at the playhead. It applies to everything under it on the timeline.</p>`}
+    <div class="fx-grid">${list.map((f) => `<button class="fx-card ${sel?.fx === f.id ? 'on' : ''}" data-fx-add="${f.id}" title="${H.esc(f.name)}"><img src="${fxThumb(f.id, sec)}" alt=""><span>${H.esc(f.name)}</span></button>`).join('')}</div>`;
+  $$('[data-fsec]', p).forEach((b) => (b.onclick = () => { V.fxSec = b.dataset.fsec; if (V.fxSec === 'body') warmSegmenter(); renderEffectsPanel(p); }));
+  $$('[data-fcat]', p).forEach((b) => (b.onclick = () => { V.fxCat = b.dataset.fcat; renderEffectsPanel(p); }));
+  $$('[data-fx-add]', p).forEach((b) => (b.onclick = () => { addEffectLayer(sec, b.dataset.fxAdd); renderEffectsPanel(p); }));
+  const nw = $('#fxNew', p);
+  if (nw) nw.onclick = () => { select(null); renderEffectsPanel(p); };
+}
+
+const transThumbs = new Map();
+function sampleFrame(i, w, h) {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const g = c.getContext('2d');
+  const gr = g.createLinearGradient(0, 0, w, h);
+  gr.addColorStop(0, i ? '#0ea5e9' : '#f97316');
+  gr.addColorStop(1, i ? '#4f46e5' : '#db2777');
+  g.fillStyle = gr;
+  g.fillRect(0, 0, w, h);
+  g.fillStyle = 'rgba(255,255,255,0.9)';
+  g.font = `800 ${Math.round(w * 0.5)}px "DM Sans", sans-serif`;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(i ? 'B' : 'A', w / 2, h / 2);
+  return c;
+}
+/** Picture of a transition halfway through, using two sample frames. */
+function transThumb(type) {
+  if (transThumbs.has(type)) return transThumbs.get(type);
+  const w = 96;
+  const h = 128;
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const g = c.getContext('2d');
+  const base = { type: 'image', dur: 1, speed: 1, fit: 'fill', filter: 'none', adjust: {}, effect: 'none' };
+  const a = { ...base, id: '__ta' };
+  const b = { ...base, id: '__tb', transition: { type, dur: 1 } };
+  const saved = { clips: V.p.clips, els: V.els, effects: V.p.effects };
+  V.p.clips = [a, b];
+  V.p.effects = [];
+  V.els = new Map([['__ta', sampleFrame(0, w, h)], ['__tb', sampleFrame(1, w, h)]]);
+  try {
+    if (type === 'none') drawClipWithTransition(g, w, h, 0.5);
+    else drawClipWithTransition(g, w, h, 1.42);
+  } catch (e) {
+    console.error(e);
+  } finally {
+    V.p.clips = saved.clips;
+    V.p.effects = saved.effects;
+    V.els = saved.els;
+  }
+  const url = c.toDataURL('image/jpeg', 0.8);
+  transThumbs.set(type, url);
+  return url;
+}
+function openTransitions(i) {
+  V.trIdx = i;
+  V.tab = 'transitions';
+  V.panelOpen = true;
+  if (H.isMobile()) V.inspectorOpen = false;
+  syncPanels();
+  renderPanel();
+  renderTimeline();
+  const st = clipStarts()[i];
+  if (st != null) seek(Math.max(0, st - 0.4));
+}
+function renderTransitionsPanel(p) {
+  const n = V.p.clips.length;
+  if (n < 2) {
+    p.innerHTML = `<h3>Transitions</h3><p class="muted">Add two or more clips to the timeline. A transition plays where one clip changes to the next.</p>
+      <div class="fx-grid">${TRANSITIONS.filter(([id]) => id !== 'none').map(([id, l]) => `<div class="fx-card dim"><img src="${transThumb(id)}" alt=""><span>${l}</span></div>`).join('')}</div>`;
+    return;
+  }
+  const starts = clipStarts();
+  if (!(V.trIdx >= 1 && V.trIdx < n)) {
+    // the cut nearest to the playhead
+    let best = 1;
+    for (let i = 1; i < n; i++) if (Math.abs(starts[i] - V.t) < Math.abs(starts[best] - V.t)) best = i;
+    V.trIdx = best;
+  }
+  const i = V.trIdx;
+  const c = V.p.clips[i];
+  const cur = c.transition?.type || 'none';
+  const dur = c.transition?.dur || 0.5;
+  p.innerHTML = `<h3>Transitions</h3>
+    <div class="tr-nav"><button class="icon-btn" id="trPrev" ${i <= 1 ? 'disabled' : ''} title="Previous cut">${H.icon('chevLeft')}</button>
+      <div><b>Cut ${i} of ${n - 1}</b><small class="muted">Clip ${i} → clip ${i + 1} · at ${fmt(starts[i])}</small></div>
+      <button class="icon-btn" id="trNext" ${i >= n - 1 ? 'disabled' : ''} title="Next cut">${H.icon('chevRight')}</button></div>
+    <p class="muted">Tap a transition to use it at this cut. You can also tap the ＋ between clips on the timeline.</p>
+    <div class="fx-grid">${TRANSITIONS.map(([id, l]) => `<button class="fx-card ${cur === id ? 'on' : ''}" data-tr-set="${id}"><img src="${transThumb(id)}" alt=""><span>${l}</span></button>`).join('')}</div>
+    <div class="field mt"><label>Length <b>${dur.toFixed(1)}s</b></label><input type="range" id="trDur" min="0.2" max="2" step="0.1" value="${dur}"></div>
+    <div class="row wrap"><button class="btn ghost small" id="trAll">Use at every cut</button><button class="btn ghost small" id="trRandom">Mix it up (random)</button><button class="btn ghost small" id="trNone">Remove all</button></div>`;
+  const play = () => previewRange(starts[i] - 0.7, starts[i] + (c.transition?.dur || 0.5) + 0.6);
+  $('#trPrev', p).onclick = () => openTransitions(i - 1);
+  $('#trNext', p).onclick = () => openTransitions(i + 1);
+  $$('[data-tr-set]', p).forEach((b) => (b.onclick = () => {
+    c.transition = { type: b.dataset.trSet, dur };
+    commit();
+    renderTransitionsPanel(p);
+    if (b.dataset.trSet !== 'none') play();
+  }));
+  const d = $('#trDur', p);
+  d.oninput = () => { c.transition = { type: cur === 'none' ? 'fade' : cur, dur: +d.value }; d.previousElementSibling.querySelector('b').textContent = (+d.value).toFixed(1) + 's'; };
+  d.onchange = () => { commit(); renderTransitionsPanel(p); play(); };
+  $('#trAll', p).onclick = () => { const tr = { type: cur === 'none' ? 'fade' : cur, dur }; V.p.clips.forEach((x, k) => { if (k > 0) x.transition = { ...tr }; }); commit(); renderTransitionsPanel(p); H.toast(`Transitions added at all ${n - 1} cuts`); };
+  $('#trRandom', p).onclick = () => { const pool = TRANSITIONS.filter(([id]) => id !== 'none'); V.p.clips.forEach((x, k) => { if (k > 0) x.transition = { type: pool[Math.floor(Math.random() * pool.length)][0], dur: x.transition?.dur || 0.5 }; }); commit(); renderTransitionsPanel(p); H.toast('Mixed transitions added'); };
+  $('#trNone', p).onclick = () => { V.p.clips.forEach((x) => (x.transition = { type: 'none', dur: x.transition?.dur || 0.5 })); commit(); renderTransitionsPanel(p); };
 }
 
 function renderTemplatesPanel(p) {
@@ -2209,7 +2742,7 @@ function renderInspector() {
       <div class="field"><label>Size</label><select id="vSize">${[...new Set(ALL_VIDEO_SIZES.map((x) => x.group))].map((g) => `<optgroup label="${g}">${ALL_VIDEO_SIZES.filter((x) => x.group === g).map((pr) => `<option value="${pr.w}x${pr.h}" ${pr.w === V.p.width && pr.h === V.p.height ? 'selected' : ''}>${pr.name} (${pr.w}×${pr.h})</option>`).join('')}</optgroup>`).join('')}<option value="custom">Custom size…</option></select></div>
       <div class="grid2" id="vCustom" hidden><label>Width<input type="number" id="vCW" value="${V.p.width}" min="64" max="4096"></label><label>Height<input type="number" id="vCH" value="${V.p.height}" min="64" max="4096"></label><button class="btn ghost small" id="vCApply">Apply size</button></div>
       <div class="field"><label>Background color</label><input type="color" id="vBg" value="${V.p.bg || '#000000'}"></div>
-      <p class="muted">${V.p.clips.length} clip(s) · ${V.p.overlays.length} text/sticker(s) · ${V.p.audio.length} audio · length ${fmt(totalDur())}</p>
+      <p class="muted">${V.p.clips.length} clip(s) · ${V.p.overlays.length} text/sticker(s) · ${(V.p.effects || []).length} effect(s) · ${V.p.audio.length} audio · length ${fmt(totalDur())}</p>
       <h4>Shortcuts</h4>
       <ul class="shortcuts"><li><kbd>Space</kbd> Play / pause</li><li><kbd>S</kbd> Split at playhead</li><li><kbd>Del</kbd> Delete</li><li><kbd>←</kbd> <kbd>→</kbd> Step a frame (Shift: 1s)</li><li><kbd>Ctrl</kbd>+<kbd>Z</kbd> Undo</li></ul>`;
     const setSize = (w, h) => {
@@ -2249,8 +2782,9 @@ function renderInspector() {
            <div class="field"><label>Volume <b>${Math.round((s.volume ?? 1) * 100)}%</b></label><input type="range" id="cVol" min="0" max="2" step="0.05" value="${s.volume ?? 1}"></div>
            <label class="row"><input type="checkbox" id="cMute" ${s.muted ? 'checked' : ''}> Mute clip sound</label>`}
       <div class="field mt"><label>Framing</label><div class="seg"><button data-fit="fill" class="${s.fit !== 'fit' ? 'on' : ''}">Fill frame</button><button data-fit="fit" class="${s.fit === 'fit' ? 'on' : ''}">Fit + blur</button></div></div>
-      <h4>Effect</h4>
+      <h4>Clip motion</h4>
       <div class="filter-grid">${EFFECTS.map(([id, l]) => `<button data-fx="${id}" class="${(s.effect || 'none') === id ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <div class="row wrap mt"><button class="btn ghost small" id="cMoreFx">${H.icon('sparkle', 14)} Video & body effects</button>${idx > 0 ? `<button class="btn ghost small" id="cMoreTr">${H.icon('transition', 14)} Transitions</button>` : ''}</div>
       ${s.type !== 'color' ? `<h4>Crop & position</h4>
       <label class="frow">Zoom <input type="range" id="tZoom" min="1" max="3" step="0.02" value="${tf.zoom || 1}"></label>
       <label class="frow">Move left / right <input type="range" id="tX" min="-1" max="1" step="0.01" value="${tf.x || 0}"></label>
@@ -2301,6 +2835,8 @@ function renderInspector() {
     on('#cTrDur', 'oninput', (e) => { s.transition = { ...(s.transition || { type: 'fade' }), dur: +e.target.value }; });
     on('#cTrDur', 'onchange', () => commit());
     on('#cTrAll', 'onclick', () => { V.p.clips.forEach((c, i) => { if (i > 0) c.transition = { ...s.transition }; }); commit(); H.toast('Applied to all clips'); });
+    on('#cMoreFx', 'onclick', () => { V.tab = 'effects'; V.panelOpen = true; if (H.isMobile()) V.inspectorOpen = false; syncPanels(); renderPanel(); });
+    on('#cMoreTr', 'onclick', () => openTransitions(idx));
     on('#cLeft', 'onclick', () => moveClip(-1));
     on('#cRight', 'onclick', () => moveClip(1));
     on('#cSplit', 'onclick', splitAtPlayhead);
@@ -2398,6 +2934,35 @@ function renderInspector() {
     on('#oDel', 'onclick', deleteSel);
     return;
   }
+  if (kind === 'effect') {
+    const body = s.kind === 'body';
+    const opts = body ? BODY_FX : VIDEO_FX;
+    el.innerHTML = `<h3>${body ? 'Body effect' : 'Video effect'}</h3>
+      <p class="muted">Applies to everything under it, from ${fmt(s.start)} for ${s.dur.toFixed(1)}s.</p>
+      ${body ? `<p class="muted">${segStatusText()}</p>` : ''}
+      <div class="field"><label>Effect</label><select id="eFx">${body ? opts.map((f) => `<option value="${f.id}" ${f.id === s.fx ? 'selected' : ''}>${H.esc(f.name)}</option>`).join('') : FX_CATS.slice(1).map((c) => `<optgroup label="${c}">${opts.filter((f) => f.cat === c).map((f) => `<option value="${f.id}" ${f.id === s.fx ? 'selected' : ''}>${H.esc(f.name)}</option>`).join('')}</optgroup>`).join('')}</select></div>
+      <div class="field"><label>Strength <b>${Math.round((s.amount ?? 1) * 100)}%</b></label><input type="range" id="eAmt" min="0.2" max="1.5" step="0.05" value="${s.amount ?? 1}"></div>
+      ${COLOR_FX[s.fx] ? `<div class="field"><label>Color</label><input type="color" id="eColor" value="${s.color || COLOR_FX[s.fx]}"></div>` : ''}
+      <div class="grid2"><label>Starts at (s)<input type="number" id="eStart" step="0.1" min="0" value="${s.start.toFixed(1)}"></label>
+        <label>Duration (s)<input type="number" id="eDur" step="0.1" min="0.2" value="${s.dur.toFixed(1)}"></label></div>
+      <div class="row wrap mt"><button class="btn ghost small" id="ePlay">${H.icon('play', 14)} Preview</button><button class="btn ghost small" id="eFull">Whole video</button><button class="btn ghost small" id="eClip">Match clip</button></div>
+      <div class="row wrap"><button class="btn ghost small" id="eDup">Duplicate</button><button class="btn ghost small" id="eSplit">Split</button><button class="btn ghost small" id="eDel">Delete</button></div>`;
+    const on = (id, ev, fn) => { const x = $(id, el); if (x) x[ev] = fn; };
+    on('#eFx', 'onchange', (e) => { s.fx = e.target.value; if (COLOR_FX[s.fx] && !s.color) s.color = COLOR_FX[s.fx]; commit(); previewRange(s.start, s.start + Math.min(s.dur, 2.5)); });
+    on('#eAmt', 'oninput', (e) => { s.amount = +e.target.value; e.target.previousElementSibling.querySelector('b').textContent = Math.round(s.amount * 100) + '%'; });
+    on('#eAmt', 'onchange', () => commit());
+    on('#eColor', 'oninput', (e) => { s.color = e.target.value; });
+    on('#eColor', 'onchange', () => commit());
+    on('#eStart', 'onchange', (e) => { s.start = Math.max(0, +e.target.value || 0); commit(); });
+    on('#eDur', 'onchange', (e) => { s.dur = Math.max(0.2, +e.target.value || 1); commit(); });
+    on('#ePlay', 'onclick', () => previewRange(s.start, s.start + Math.min(s.dur, 4)));
+    on('#eFull', 'onclick', () => { s.start = 0; s.dur = Math.max(0.5, V.p.clips.length ? mainDur() : totalDur()); commit(); });
+    on('#eClip', 'onclick', () => { const act = activeClip(clamp(V.t, s.start, s.start + s.dur - 0.01)) || activeClip(s.start); if (act) { s.start = act.start; s.dur = clipDur(act.clip); commit(); } });
+    on('#eDup', 'onclick', duplicateSel);
+    on('#eSplit', 'onclick', splitAtPlayhead);
+    on('#eDel', 'onclick', deleteSel);
+    return;
+  }
   if (kind === 'audio') {
     const len = s.out - s.in;
     el.innerHTML = `<h3>Audio</h3><p class="muted">${H.esc(s.name || '')} · ${len.toFixed(1)}s</p>
@@ -2432,9 +2997,17 @@ function openExport() {
   </div>`;
   document.body.appendChild(m);
   $('#exCancel', m).onclick = () => m.remove();
-  $('#exGo', m).onclick = () => {
+  $('#exGo', m).onclick = async () => {
     const res = +$('#exRes', m).value;
     m.remove();
+    if ((V.p.effects || []).some((e) => e.kind === 'body') && segState() !== 'ready') {
+      H.toast('Loading body effects…');
+      try {
+        await loadSegmenter();
+      } catch {
+        H.toast("Body effects couldn't load, so they'll be left out of this export");
+      }
+    }
     startExport(res, mime);
   };
 }
