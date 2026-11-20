@@ -9,6 +9,8 @@ import { FONTS } from './data.js';
 import { getKey, AI_MODELS, AI_STYLES, VIDEO_MODELS, closestRatio, generateImage, generateVideo, toDataURL } from './ai.js';
 import { VIDEO_TEMPLATES, TEMPLATE_CATS as VT_CATS, buildFromTemplate, templateDuration } from './videotemplates.js';
 import { transcribeMedia, scriptToLines } from './captions.js';
+import { MUSIC_STYLES, SFX, renderMusic, renderSfx } from './music.js';
+import { VOICES, speak } from './tts.js';
 
 export const VIDEO_PRESETS = [
   { id: 'tiktok', name: 'TikTok', w: 1080, h: 1920, color: '#111111', hint: '9:16 · up to 10 min' },
@@ -1706,27 +1708,7 @@ async function renderPanel() {
       if (g) g.innerHTML = '<p class="muted">Could not load graphics.</p>';
     }
   } else if (tab === 'audio') {
-    const items = V.p.mediaIds.map((id) => [id, V.meta.get(id)]).filter(([, m]) => m && m.type === 'audio');
-    p.innerHTML = `<h3>Audio</h3>
-      <button class="btn primary block" id="vImportAudio">${H.icon('music')} Add music or voice-over</button>
-      <p class="muted">MP3, WAV, M4A or OGG. Added at the playhead. Clip sound is mixed in automatically — change it per clip in Edit.</p>
-      <div class="v-audio-list">${items.map(([id, m]) => `<button class="v-audio-item" data-aid="${id}">♪ ${H.esc(m.name)} <small>${fmt(m.duration)}</small></button>`).join('') || ''}</div>`;
-    $('#vImportAudio').onclick = () => {
-      const inp = document.createElement('input');
-      inp.type = 'file';
-      inp.accept = 'audio/*';
-      inp.multiple = true;
-      inp.onchange = async () => {
-        for (const f of inp.files) {
-          const m = await importFile(f);
-          if (m) addAudio(m.id, m.duration, V.t >= totalDur() - 0.1 ? 0 : V.t);
-        }
-        renderPanel();
-        commit();
-      };
-      inp.click();
-    };
-    $$('[data-aid]', p).forEach((b) => (b.onclick = () => { addAudio(b.dataset.aid, V.meta.get(b.dataset.aid).duration, V.t >= totalDur() - 0.1 ? 0 : V.t); commit(); }));
+    renderAudioPanel(p);
   } else if (tab === 'designs') {
     const list = (await H.listDesigns()).filter((d) => d.kind !== 'video');
     p.innerHTML = `<h3>Your designs</h3><p class="muted">Turn any Artvas design into a video slide. Click a design to add each of its pages as a 3-second photo clip.</p>
@@ -1745,6 +1727,171 @@ async function renderPanel() {
   } else if (tab === 'ai') renderAIPanel(p);
   else if (tab === 'templates') renderTemplatesPanel(p);
   else if (tab === 'captions') renderCaptionsPanel(p);
+}
+
+// ---------- Audio panel: music library, sound effects, text to speech ----------
+let previewAudio = null;
+function stopPreview() {
+  if (previewAudio) {
+    previewAudio.pause();
+    URL.revokeObjectURL(previewAudio.src);
+    previewAudio = null;
+  }
+  $$('.mus-play.on').forEach((b) => b.classList.remove('on'));
+}
+function playBlob(blob, btn) {
+  stopPreview();
+  previewAudio = new Audio(URL.createObjectURL(blob));
+  previewAudio.play().catch(() => {});
+  if (btn) {
+    btn.classList.add('on');
+    previewAudio.onended = () => btn.classList.remove('on');
+  }
+}
+
+function renderAudioPanel(p) {
+  V.au = V.au || { section: 'music', len: 'auto', seeds: {}, voice: 'af_heart', speed: 1, ttsText: '', ttsBusy: false, ttsStatus: '', ttsCaptions: true };
+  const a = V.au;
+  const sec = a.section;
+  const imported = V.p.mediaIds.map((id) => [id, V.meta.get(id)]).filter(([, m]) => m && m.type === 'audio');
+  p.innerHTML = `<h3>Audio</h3>
+    <div class="seg full">${[['music', 'Music'], ['sfx', 'Sound effects'], ['tts', 'Text to speech'], ['mine', 'My audio']].map(([id, l]) => `<button data-asec="${id}" class="${sec === id ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <div id="auBody" class="mt"></div>`;
+  $$('[data-asec]', p).forEach((b) => (b.onclick = () => { a.section = b.dataset.asec; stopPreview(); renderAudioPanel(p); }));
+  const body = $('#auBody', p);
+
+  if (sec === 'music') {
+    const vlen = mainDur() ? Math.max(5, Math.ceil(mainDur())) : 30;
+    body.innerHTML = `<p class="muted">Original tracks composed by Artvas for you — royalty-free, use them anywhere. Every tap on ⟳ makes a new variation.</p>
+      <div class="field"><label>Length</label><div class="seg">${[['auto', `Video (${vlen}s)`], ['15', '15s'], ['30', '30s'], ['60', '60s']].map(([v, l]) => `<button data-mlen="${v}" class="${a.len === v ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+      <div class="mus-list">${MUSIC_STYLES.map((s) => `<div class="mus-item" style="--mc:${s.color}">
+        <button class="mus-play" data-mprev="${s.id}" title="Preview">${H.icon('play', 16)}</button>
+        <div class="mus-meta"><b>${H.esc(s.name)}</b><small>${H.esc(s.mood)} · ${s.bpm[0]}–${s.bpm[1]} BPM</small></div>
+        <button class="icon-btn" data-mseed="${s.id}" title="New variation">⟳</button>
+        <button class="btn ghost small" data-madd="${s.id}">Add</button></div>`).join('')}</div>
+      <p class="muted" id="musStatus"></p>`;
+    $$('[data-mlen]', body).forEach((b) => (b.onclick = () => { a.len = b.dataset.mlen; renderAudioPanel(p); }));
+    const status = (m) => { const s = $('#musStatus'); if (s) s.textContent = m; };
+    const seedOf = (id) => a.seeds[id] || 1;
+    $$('[data-mseed]', body).forEach((b) => (b.onclick = () => { a.seeds[b.dataset.mseed] = seedOf(b.dataset.mseed) + 1; H.toast('New variation — preview or add it'); }));
+    $$('[data-mprev]', body).forEach((b) => (b.onclick = async () => {
+      if (b.classList.contains('on')) return stopPreview();
+      status('Composing preview…');
+      const { blob, bpm } = await renderMusic(b.dataset.mprev, { duration: 12, seed: seedOf(b.dataset.mprev) });
+      status(`Preview · ${bpm} BPM`);
+      playBlob(blob, b);
+    }));
+    $$('[data-madd]', body).forEach((b) => (b.onclick = async () => {
+      const st = MUSIC_STYLES.find((s) => s.id === b.dataset.madd);
+      const len = a.len === 'auto' ? (mainDur() ? Math.max(5, Math.ceil(mainDur())) : 30) : +a.len;
+      b.disabled = true;
+      status(`Composing ${st.name} (${len}s)…`);
+      const { blob } = await renderMusic(st.id, { duration: len, seed: seedOf(st.id) });
+      const m = await importFile(new File([blob], `${st.name} · Artvas Music.wav`, { type: 'audio/wav' }));
+      if (m) {
+        addAudio(m.id, m.duration, 0);
+        const au = V.p.audio[V.p.audio.length - 1];
+        au.volume = 0.6;
+        au.fadeOut = 2;
+        commit();
+      }
+      b.disabled = false;
+      status(`${st.name} added to your video.`);
+    }));
+  } else if (sec === 'sfx') {
+    body.innerHTML = `<p class="muted">Tap to hear, + to add at the playhead.</p>
+      <div class="sfx-grid">${SFX.map((s) => `<div class="sfx"><button class="sfx-play" data-sprev="${s.id}">${H.icon('play', 12)} ${H.esc(s.name)}</button><button class="sfx-add" data-sadd="${s.id}" title="Add at playhead">+</button></div>`).join('')}</div>`;
+    $$('[data-sprev]', body).forEach((b) => (b.onclick = async () => playBlob((await renderSfx(b.dataset.sprev)).blob)));
+    $$('[data-sadd]', body).forEach((b) => (b.onclick = async () => {
+      const s = SFX.find((x) => x.id === b.dataset.sadd);
+      const { blob } = await renderSfx(s.id);
+      const m = await importFile(new File([blob], `${s.name}.wav`, { type: 'audio/wav' }));
+      if (m) {
+        addAudio(m.id, m.duration, Math.min(V.t, Math.max(0, totalDur() - 0.1)));
+        const au = V.p.audio[V.p.audio.length - 1];
+        au.fadeOut = 0;
+        commit();
+        H.toast(`${s.name} added`);
+      }
+    }));
+  } else if (sec === 'tts') {
+    const groups = [['US', 'Female'], ['US', 'Male'], ['UK', 'Female'], ['UK', 'Male']];
+    body.innerHTML = `<p class="muted">Natural AI voices that run free in your browser. The first time, the voice model (~90 MB) downloads once. English voices.</p>
+      <textarea class="search ai-prompt" id="ttsText" rows="5" placeholder="Type what the voice should say…">${H.esc(a.ttsText)}</textarea>
+      <div class="field mt"><label>Voice</label><select id="ttsVoice">${groups.map(([acc, g]) => `<optgroup label="${acc === 'US' ? 'American' : 'British'} ${g.toLowerCase()}">${VOICES.filter((v) => v.accent === acc && v.gender === g).map((v) => `<option value="${v.id}" ${v.id === a.voice ? 'selected' : ''}>${v.name} — ${v.desc}</option>`).join('')}</optgroup>`).join('')}</select></div>
+      <div class="field"><label>Speed <b>${a.speed.toFixed(2)}×</b></label><input type="range" id="ttsSpeed" min="0.6" max="1.6" step="0.05" value="${a.speed}"></div>
+      <label class="row"><input type="checkbox" id="ttsCap" ${a.ttsCaptions ? 'checked' : ''}> Add matching captions</label>
+      <div class="row mt"><button class="btn ghost" id="ttsPrev" ${a.ttsBusy ? 'disabled' : ''}>${H.icon('play', 14)} Preview</button>
+        <button class="btn primary" id="ttsAdd" ${a.ttsBusy ? 'disabled' : ''}>${H.icon('music', 14)} Add voice-over</button></div>
+      <p class="muted" id="ttsStatus">${H.esc(a.ttsStatus)}</p>
+      ${V.sel?.kind === 'overlay' && findSel()?.type === 'text' ? `<button class="btn ghost small" id="ttsFromText">Use the selected text</button>` : ''}`;
+    $('#ttsText', body).oninput = (e) => (a.ttsText = e.target.value);
+    $('#ttsVoice', body).onchange = (e) => (a.voice = e.target.value);
+    $('#ttsSpeed', body).oninput = (e) => { a.speed = +e.target.value; e.target.previousElementSibling.querySelector('b').textContent = a.speed.toFixed(2) + '×'; };
+    $('#ttsCap', body).onchange = (e) => (a.ttsCaptions = e.target.checked);
+    const fromText = $('#ttsFromText', body);
+    if (fromText) fromText.onclick = () => { a.ttsText = findSel().text; renderAudioPanel(p); };
+    const status = (m) => { a.ttsStatus = m; const s = $('#ttsStatus'); if (s) s.textContent = m; };
+    const run = async (add) => {
+      if (!a.ttsText.trim()) return H.toast('Type what the voice should say first');
+      a.ttsBusy = true;
+      $('#ttsPrev', body).disabled = true;
+      $('#ttsAdd', body).disabled = true;
+      try {
+        const out = await speak(a.ttsText, { voice: a.voice, speed: a.speed, onStatus: status });
+        if (!add) {
+          playBlob(out.blob);
+          status(`Preview · ${out.duration.toFixed(1)}s`);
+        } else {
+          const vName = VOICES.find((v) => v.id === a.voice)?.name || 'Voice';
+          const m = await importFile(new File([out.blob], `Voice-over (${vName}).wav`, { type: 'audio/wav' }));
+          const at = V.t >= totalDur() - 0.1 ? 0 : V.t;
+          if (m) {
+            addAudio(m.id, m.duration, at);
+            const au = V.p.audio[V.p.audio.length - 1];
+            au.fadeOut = 0;
+            au.name = `Voice: ${vName}`;
+            if (a.ttsCaptions)
+              for (const sg of out.segments) {
+                const pieces = scriptToLines(sg.text);
+                const share = (sg.end - sg.start) / pieces.length;
+                pieces.forEach((piece, i) => V.p.overlays.push(captionOverlay(piece, at + sg.start + i * share, at + sg.start + (i + 1) * share)));
+              }
+            commit();
+            status(`Voice-over added (${out.duration.toFixed(1)}s)${a.ttsCaptions ? ' with captions' : ''}.`);
+          }
+        }
+      } catch (e) {
+        console.error(e);
+        status(e.message || 'Voice generation failed');
+        H.toast(a.ttsStatus);
+      }
+      a.ttsBusy = false;
+      if ($('#ttsPrev')) { $('#ttsPrev').disabled = false; $('#ttsAdd').disabled = false; }
+    };
+    $('#ttsPrev', body).onclick = () => run(false);
+    $('#ttsAdd', body).onclick = () => run(true);
+  } else {
+    body.innerHTML = `<button class="btn primary block" id="vImportAudio">${H.icon('music')} Import music or voice-over</button>
+      <p class="muted">MP3, WAV, M4A or OGG. Added at the playhead.</p>
+      <div class="v-audio-list">${imported.map(([id, m]) => `<button class="v-audio-item" data-aid="${id}">♪ ${H.esc(m.name)} <small>${fmt(m.duration)}</small></button>`).join('') || '<p class="muted">No audio yet.</p>'}</div>`;
+    $('#vImportAudio', body).onclick = () => {
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = 'audio/*';
+      inp.multiple = true;
+      inp.onchange = async () => {
+        for (const f of inp.files) {
+          const m = await importFile(f);
+          if (m) addAudio(m.id, m.duration, V.t >= totalDur() - 0.1 ? 0 : V.t);
+        }
+        renderAudioPanel(p);
+        commit();
+      };
+      inp.click();
+    };
+    $$('[data-aid]', body).forEach((b) => (b.onclick = () => { addAudio(b.dataset.aid, V.meta.get(b.dataset.aid).duration, V.t >= totalDur() - 0.1 ? 0 : V.t); commit(); }));
+  }
 }
 
 function templateCard(tpl) {
@@ -1957,7 +2104,7 @@ function renderAIPanel(p) {
   const a = V.ai;
   const vm = VIDEO_MODELS.find((m) => m.id === a.vmodel) || VIDEO_MODELS[0];
   p.innerHTML = `<h3>AI generate</h3>
-    ${key ? '' : `<div class="ai-connect"><b>Connect your Muapi.ai key</b><p class="muted">Add your key in a design's AI Image tab, or here:</p>
+    ${key || (a.mode === 'image' && AI_MODELS.find((m) => m.id === a.model)?.free) ? '' : `<div class="ai-connect"><b>Connect your Muapi.ai key</b><p class="muted">Add your key in a design's AI Image tab, or here:</p>
       <input class="search" id="vAiKey" type="password" placeholder="Muapi API key"><button class="btn primary block" id="vAiKeySave">Save key</button></div>`}
     <div class="seg"><button data-aim="image" class="${a.mode === 'image' ? 'on' : ''}">Image clip</button><button data-aim="video" class="${a.mode === 'video' ? 'on' : ''}">Video clip</button></div>
     <label class="flabel mt">Describe it<textarea class="search ai-prompt" id="vAiPrompt" rows="4" placeholder="${a.mode === 'video' ? 'e.g. drone shot flying over a turquoise lagoon at sunrise' : 'e.g. neon city street at night in the rain'}">${H.esc(a.prompt)}</textarea></label>
@@ -1967,7 +2114,8 @@ function renderAIPanel(p) {
       : `<div class="grid2"><label>Model<select id="vAiVModel">${VIDEO_MODELS.map((m) => `<option value="${m.id}" ${m.id === a.vmodel ? 'selected' : ''}>${H.esc(m.name)}</option>`).join('')}</select></label>
          <label>Length<select id="vAiDur">${vm.durations.map((d) => `<option ${d === a.duration ? 'selected' : ''}>${d}</option>`).join('')}</select></label></div>
          <p class="muted">Video generation can take 1–5 minutes and costs more credits than images.</p>`}
-    <button class="btn primary block mt" id="vAiGo" ${!key || a.busy ? 'disabled' : ''}>${H.icon('wand')} ${a.busy ? 'Generating…' : a.mode === 'video' ? 'Generate video clip' : 'Generate image clip'}</button>
+    ${a.mode === 'image' && AI_MODELS.find((m) => m.id === a.model)?.free ? '<p class="muted">Free AI by Pollinations.ai — no key needed, small watermark.</p>' : a.mode === 'video' ? '<p class="muted">AI video clips need a Muapi key and credits — no free video AI is good enough yet.</p>' : ''}
+    <button class="btn primary block mt" id="vAiGo" ${(!key && !(a.mode === 'image' && AI_MODELS.find((m) => m.id === a.model)?.free)) || a.busy ? 'disabled' : ''}>${H.icon('wand')} ${a.busy ? 'Generating…' : a.mode === 'video' ? 'Generate video clip' : 'Generate image clip'}</button>
     <p class="muted" id="vAiStatus">${H.esc(a.status || '')}</p>`;
   const save = $('#vAiKeySave', p);
   if (save) save.onclick = () => { H.setKey($('#vAiKey', p).value.trim()); renderAIPanel(p); };

@@ -567,3 +567,24 @@ kbd { background: #f1f0f5; border: 1px solid var(--line); border-bottom-width: 2
 .kf-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
 .kf { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 3px 9px; font-size: 12px; color: var(--brand); }
 .seg button { text-transform: capitalize; }
+
+/* ===== Audio library ===== */
+.seg.full { display: flex; width: 100%; }
+.seg.full button { flex: 1; padding: 7px 4px; font-size: 12px; text-transform: none; }
+.mus-list { display: flex; flex-direction: column; gap: 6px; }
+.mus-item { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px; background: #fff; }
+.mus-play { flex: none; width: 38px; height: 38px; border-radius: 10px; border: 0; color: #fff; display: grid; place-items: center; background: linear-gradient(135deg, var(--mc), #1d1530); }
+.mus-play.on { box-shadow: 0 0 0 3px var(--brand-soft); }
+.mus-play.on .ic { animation: pulse 0.8s ease-in-out infinite alternate; }
+@keyframes pulse { from { opacity: .4; } to { opacity: 1; } }
+.mus-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.mus-meta b { font-size: 13px; }
+.mus-meta small { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sfx-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.sfx { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #fff; }
+.sfx-play { flex: 1; border: 0; background: none; text-align: left; padding: 8px; font-size: 12.5px; display: flex; gap: 6px; align-items: center; }
+.sfx-play:hover { background: var(--brand-soft); }
+.sfx-add { border: 0; border-left: 1px solid var(--line); background: #fff; width: 34px; font-size: 16px; color: var(--brand); font-weight: 700; }
+.sfx-add:hover { background: var(--brand); color: #fff; }
+
+[hidden] { display: none !important; }

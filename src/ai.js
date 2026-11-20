@@ -2,6 +2,8 @@
 // On the Artvas server (e.g. Railway) requests go through a small same-origin relay; otherwise directly to the API.
 
 export const AI_MODELS = [
+  { id: 'free-flux', name: 'Free AI — no key needed', free: true, fmodel: 'flux', ar: null },
+  { id: 'free-turbo', name: 'Free AI Turbo — fastest', free: true, fmodel: 'turbo', ar: null },
   { id: 'flux-schnell-image', name: 'Flux Schnell — fast & cheap', ar: null },
   { id: 'nano-banana', name: 'Nano Banana', ar: ['1:1', '3:4', '4:3', '9:16', '16:9', '3:2', '2:3', '5:4', '4:5', '21:9'] },
   { id: 'nano-banana-pro', name: 'Nano Banana Pro', ar: ['1:1', '3:4', '4:3', '9:16', '16:9', '3:2', '2:3', '5:4', '4:5', '21:9'] },
@@ -79,6 +81,55 @@ async function check(r) {
   throw new Error(`AI service error ${r.status}${t ? ': ' + t.slice(0, 120) : ''}`);
 }
 
+export const isFreeModel = (id) => !!AI_MODELS.find((m) => m.id === id)?.free;
+
+const RATIO_DIMS = (ratio) => {
+  const [a, b] = String(ratio || '1:1').split(':').map(Number);
+  const r = a / b || 1;
+  const long = 1024;
+  return r >= 1 ? [long, Math.round(long / r / 8) * 8] : [Math.round((long * r) / 8) * 8, long];
+};
+let lastFree = 0;
+/** Free image generation (Pollinations.ai community service, no key). Returns a blob URL. */
+async function generateFree({ model, prompt, aspectRatio, onStatus }) {
+  const m = AI_MODELS.find((x) => x.id === model);
+  const [w, h] = RATIO_DIMS(aspectRatio);
+  for (let attempt = 0; attempt < 6; attempt++) {
+    // the free tier allows about one image every 15 seconds
+    const wait = Math.max(0, lastFree + 15500 - Date.now());
+    if (wait > 0) {
+      for (let s = Math.ceil(wait / 1000); s > 0; s--) {
+        onStatus?.(`Free AI is queueing… ${s}s`);
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+    lastFree = Date.now();
+    onStatus?.('Generating with free AI…');
+    const seed = Math.floor(Math.random() * 1e9);
+    const viaRelay = await useRelay();
+    const fmodel = attempt >= 2 ? 'turbo' : m?.fmodel || 'flux';
+    const url = viaRelay
+      ? `api/free-image?prompt=${encodeURIComponent(prompt.slice(0, 900))}&w=${w}&h=${h}&seed=${seed}&model=${fmodel}`
+      : `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt.slice(0, 900))}?width=${w}&height=${h}&seed=${seed}&model=${fmodel}&nologo=true`;
+    let r;
+    try {
+      r = await fetch(url, viaRelay ? {} : { referrerPolicy: 'no-referrer' });
+    } catch {
+      throw new Error("Couldn't reach the free AI service. Free AI images work on your own Artvas site (for example on Railway).");
+    }
+    if ([402, 403, 429, 502, 503].includes(r.status)) {
+      lastFree = Date.now();
+      onStatus?.('Free AI is busy — trying again…');
+      continue;
+    }
+    if (!r.ok) throw new Error(`Free AI error ${r.status}. Try again in a moment.`);
+    const blob = await r.blob();
+    if (!blob.type.startsWith('image/')) throw new Error('Free AI returned no image. Try again.');
+    return URL.createObjectURL(blob);
+  }
+  throw new Error('The free AI service is busy right now. Try again in a minute.');
+}
+
 /** Generate one video clip. Returns a video URL. */
 export async function generateVideo({ model, prompt, aspectRatio, duration, onStatus }) {
   return generateImage({ model, prompt, aspectRatio, onStatus, extra: duration ? { duration } : {}, polls: 180 });
@@ -86,6 +137,7 @@ export async function generateVideo({ model, prompt, aspectRatio, duration, onSt
 
 /** Generate one image. Returns an image URL. */
 export async function generateImage({ model, prompt, aspectRatio, onStatus, extra = {}, polls = 90 }) {
+  if (isFreeModel(model)) return generateFree({ model, prompt, aspectRatio, onStatus });
   const key = getKey();
   if (!key) throw new Error('Add your Muapi API key first.');
   const viaRelay = await useRelay();

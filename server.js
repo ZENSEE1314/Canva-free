@@ -46,6 +46,33 @@ app.get('/api/muapi/result/:id', async (req, res) => {
     res.status(502).json({ error: 'Could not reach the AI service' });
   }
 });
+// Free AI images (Pollinations.ai community service). Browsers are refused when calling it
+// directly, so the server fetches on the user's behalf. Falls back to the turbo model when busy.
+app.get('/api/free-image', async (req, res) => {
+  const prompt = String(req.query.prompt || '').slice(0, 900);
+  if (!prompt) return res.status(400).json({ error: 'Missing prompt' });
+  const w = Math.max(64, Math.min(1440, parseInt(req.query.w, 10) || 1024));
+  const h = Math.max(64, Math.min(1440, parseInt(req.query.h, 10) || 1024));
+  const seed = parseInt(req.query.seed, 10) || Math.floor(Math.random() * 1e9);
+  const models = [...new Set([String(req.query.model || 'flux').replace(/[^\w-]/g, ''), 'turbo'])];
+  let last = 502;
+  for (const model of models) {
+    try {
+      const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=${w}&height=${h}&seed=${seed}&model=${model}&nologo=true`;
+      const r = await fetch(url, { headers: { 'User-Agent': 'Artvas/1.0' } });
+      const type = r.headers.get('content-type') || '';
+      if (r.ok && type.startsWith('image/')) {
+        res.type(type).set('Cache-Control', 'private, max-age=3600').send(Buffer.from(await r.arrayBuffer()));
+        return;
+      }
+      last = r.status;
+    } catch {
+      last = 502;
+    }
+  }
+  res.status(last === 429 || last === 402 ? 429 : 502).json({ error: 'The free AI service is busy' });
+});
+
 // Fetch a generated image so the editor can use it without cross-origin problems.
 app.get('/api/image-proxy', async (req, res) => {
   let url;

@@ -15,7 +15,7 @@ import {
   PACK_CATS, loadPack, flatSrc, loadIcons, POPULAR_ICONS, iconSVG, createIcon, CHART_PRESETS, buildChart, TABLE_PRESETS, buildTable,
   GRIDS, buildGrid, gridPreview, FRAMES, buildFrame, GRADIENT_ELEMENTS, buildGradientElement, gradientPreview,
 } from './library.js';
-import { AI_MODELS, AI_STYLES, closestRatio, getKey, setKey, generateImage, toDataURL, fetchMediaBlob } from './ai.js';
+import { AI_MODELS, AI_STYLES, closestRatio, getKey, setKey, generateImage, toDataURL, fetchMediaBlob, isFreeModel } from './ai.js';
 import { openVideoEditor, closeVideoEditor, newVideoProject, VIDEO_PRESETS, SCREEN_SIZES, VIDEO_STARTERS, applyStarter, _videoDebug } from './video.js';
 import { VIDEO_TEMPLATES, TEMPLATE_CATS as VT_CATS, buildFromTemplate, templateDuration } from './videotemplates.js';
 import { icon } from './icons.js';
@@ -3284,7 +3284,7 @@ async function tabAI(p) {
   p.innerHTML = `
     <h3>AI Image</h3>
     ${
-      key
+      key || model.free
         ? ''
         : `<div class="ai-connect">
       <b>Connect your Muapi.ai key</b>
@@ -3303,13 +3303,14 @@ async function tabAI(p) {
       <label>Shape<select id="aiRatio"><option value="auto">Auto (${autoRatio})</option>${ratios.map((r) => `<option value="${r}" ${a.ratio === r ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
       <label>Images<select id="aiCount">${[1, 2, 3, 4].map((n) => `<option ${a.count === n ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
     </div>
-    <button class="btn primary block mt" id="aiGo" ${!key || a.busy ? 'disabled' : ''}>${icon('wand')} ${a.busy ? 'Generating…' : 'Generate'}</button>
+    ${model.free ? `<p class="muted ai-free">Free AI by Pollinations.ai — no key, about one image every 15 seconds, small watermark. For watermark-free premium models pick a Muapi model.</p>` : ''}
+    <button class="btn primary block mt" id="aiGo" ${(!key && !model.free) || a.busy ? 'disabled' : ''}>${icon('wand')} ${a.busy ? 'Generating…' : 'Generate'}</button>
     <p class="muted" id="aiStatus">${a.status ? esc(a.status) : ''}</p>
     ${
       spots.length
         ? `<div class="ai-fill"><b>${spots.length} empty photo spot${spots.length > 1 ? 's' : ''} on this page</b>
       <p class="muted">Fill every spot with an AI image that matches the template${spots.some((s) => s.aiPrompt) ? '' : ' (uses your description above)'}.</p>
-      <button class="btn ghost block" id="aiFillAll" ${!key || a.busy ? 'disabled' : ''}>${icon('wand')} Generate photos for this page</button></div>`
+      <button class="btn ghost block" id="aiFillAll" ${(!key && !model.free) || a.busy ? 'disabled' : ''}>${icon('wand')} Generate photos for this page</button></div>`
         : ''
     }
     <h4>Your AI images</h4>
@@ -3379,7 +3380,12 @@ async function runAIGenerate(p) {
   state.aiPanel = p;
   tabAI(p);
   try {
-    const results = await Promise.allSettled(Array.from({ length: a.count }, () => aiOne(prompt, ratio)));
+    let results;
+    if (isFreeModel(a.model)) {
+      // the free service handles one image at a time
+      results = [];
+      for (let i = 0; i < a.count; i++) results.push(await aiOne(prompt, ratio).then((value) => ({ status: 'fulfilled', value }), (reason) => ({ status: 'rejected', reason })));
+    } else results = await Promise.allSettled(Array.from({ length: a.count }, () => aiOne(prompt, ratio)));
     const ok = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
     if (!ok.length) throw results[0].reason;
     if (ph && state.canvas.getObjects().includes(ph)) await fillPlaceholder(ph, ok[0]);
@@ -3422,7 +3428,7 @@ async function runAIFillAll(p) {
       aiSetStatus(p, `Filled ${done} of ${spots.length}${failed ? ` · ${failed} failed` : ''}`);
     }
   };
-  await Promise.all([worker(), worker()]);
+  await Promise.all(isFreeModel(a.model) ? [worker()] : [worker(), worker()]);
   a.busy = false;
   a.status = failed ? `Filled ${done} of ${spots.length}. ${a.status || ''}` : `Filled all ${done} photo spot${done > 1 ? 's' : ''}.`;
   if (failed && !done) toast(a.status);
