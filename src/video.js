@@ -1218,6 +1218,7 @@ function splitAtPlayhead() {
 function replaceClip(c) {
   const inp = document.createElement('input');
   inp.type = 'file';
+  attachPicker(inp);
   inp.accept = 'video/*,image/*';
   inp.onchange = async () => {
     const f = inp.files[0];
@@ -1489,7 +1490,7 @@ function editorHTML() {
         <div class="panel-body" id="vInspector"></div>
       </aside>
     </div>
-    <input type="file" id="vFile" accept="video/*,image/*,audio/*" multiple hidden>
+    <input type="file" id="vFile" accept="video/*,image/*,audio/*" multiple class="file-hide" tabindex="-1">
   </div>`;
 }
 
@@ -2036,7 +2037,7 @@ async function renderPanel() {
   if (tab === 'media') {
     const items = V.p.mediaIds.map((id) => [id, V.meta.get(id)]).filter(([, m]) => m && m.type !== 'audio');
     p.innerHTML = `<h3>Media</h3>
-      <button class="btn primary block" id="vImport">${H.icon('upload')} Import videos & photos</button>
+      <label class="btn primary block" id="vImport" for="vFile" role="button" tabindex="0">${H.icon('upload')} Import videos & photos</label>
       <p class="muted">Or drag files anywhere onto the editor. Click a file to add it to the end of your video.</p>
       <div class="link-import"><input class="search" id="vLink" type="url" placeholder="Paste a link to a video, photo or audio file" spellcheck="false"><button class="btn ghost small" id="vLinkGo">Add</button></div>
       <p class="muted small-note" id="vLinkStatus">Works with direct file links (ending in .mp4, .mov, .webm, .mp3, .jpg…).</p>
@@ -2044,7 +2045,6 @@ async function renderPanel() {
       <p class="muted mt"><b>PiP</b> puts a video or photo on top of your main video — use it for reactions, logos or green-screen clips.</p>
       <h4>Blank clip</h4>
       <div class="row"><input type="color" id="vColorClip" value="#111111"><button class="btn ghost small" id="vAddColor">Add color clip (3s)</button></div>`;
-    $('#vImport').onclick = () => $('#vFile').click();
     const go = () => importFromLink($('#vLink', p).value.trim(), (m) => { const st = $('#vLinkStatus'); if (st) st.textContent = m; });
     $('#vLinkGo', p).onclick = go;
     $('#vLink', p).onkeydown = (e) => e.key === 'Enter' && go();
@@ -2275,6 +2275,7 @@ function renderAudioPanel(p) {
     $('#vImportAudio', body).onclick = () => {
       const inp = document.createElement('input');
       inp.type = 'file';
+      attachPicker(inp);
       inp.accept = 'audio/*';
       inp.multiple = true;
       inp.onchange = async () => {
@@ -2632,6 +2633,7 @@ export function applyTemplate(id, media = []) {
 function pickAndFillSlots() {
   const inp = document.createElement('input');
   inp.type = 'file';
+  attachPicker(inp);
   inp.accept = 'video/*,image/*';
   inp.multiple = true;
   inp.onchange = async () => {
@@ -2747,6 +2749,7 @@ function renderCaptionsPanel(p) {
   $('#capFile', p).onclick = () => {
     const inp = document.createElement('input');
     inp.type = 'file';
+    attachPicker(inp);
     inp.accept = 'video/*,audio/*';
     inp.onchange = () => inp.files[0] && runAutoCaptions(p, inp.files[0]);
     inp.click();
@@ -3227,3 +3230,13 @@ function finishExport() {
 
 // test hook
 export const _videoDebug = () => V;
+
+/** Put a file input made in code into the page (visually hidden) so phones open the picker. */
+function attachPicker(inp) {
+  inp.className = 'file-hide';
+  inp.tabIndex = -1;
+  document.body.appendChild(inp);
+  inp.addEventListener('change', () => setTimeout(() => inp.remove(), 1000));
+  // if the picker is closed without choosing, tidy up the next time the page gets focus
+  window.addEventListener('focus', () => setTimeout(() => !inp.files?.length && inp.remove(), 3000), { once: true });
+}

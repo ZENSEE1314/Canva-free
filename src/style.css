@@ -648,3 +648,7 @@ kbd { background: #f1f0f5; border: 1px solid var(--line); border-bottom-width: 2
 
 .link-import { display: flex; gap: 6px; margin-top: 10px; }
 .link-import input { flex: 1; min-width: 0; }
+
+.file-hide { position: absolute !important; width: 1px !important; height: 1px !important; opacity: 0 !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; pointer-events: none; left: 0; top: 0; }
+label.btn { cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+label.btn.block { display: flex; }

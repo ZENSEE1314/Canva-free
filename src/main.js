@@ -113,7 +113,7 @@ async function renderHome() {
     <header class="home-top">
       <div class="logo">${logoSvg()}<span>Artvas</span></div>
       <div class="home-actions">
-        <label class="btn ghost">${icon('folder')} Open file<input type="file" id="openFile" accept=".json,.artvas" hidden></label>
+        <label class="btn ghost">${icon('folder')} Open file<input type="file" id="openFile" accept=".json,.artvas" class="file-hide" tabindex="-1"></label>
         <button class="btn primary" id="newCustomTop">${icon('plus')} Create a design</button>
       </div>
     </header>
@@ -557,7 +557,7 @@ function editorHTML() {
       </aside>
     </div>
     <div class="ctxmenu" id="ctxMenu" hidden></div>
-    <input type="file" id="fileUpload" accept="image/*" multiple hidden>
+    <input type="file" id="fileUpload" accept="image/*" multiple class="file-hide" tabindex="-1">
   </div>`;
 }
 
@@ -1473,9 +1473,9 @@ async function tabTemplates(p) {
     <div class="chips">${cats.map((c) => `<button class="chip ${state.tplCat === c ? 'on' : ''}" data-cat="${c}">${c === 'Mine' ? 'My templates' : c}</button>`).join('')}</div>
     <div id="mineWrap">
       <div class="row"><h4 style="margin:6px 0">My templates ${mine.length ? `<small class="muted">(${mine.length})</small>` : ''}</h4><span class="spacer"></span>
-        <button class="btn ghost small" id="tplImport" title="Import templates from a file">Import</button>
+        <label class="btn ghost small" id="tplImport" for="tplImportFile" role="button" tabindex="0" title="Import templates from a file">Import</label>
         ${mine.length ? `<button class="btn ghost small" id="tplExport" title="Download your templates as a file">Export</button>` : ''}
-        <input type="file" id="tplImportFile" accept=".json" hidden></div>
+        <input type="file" id="tplImportFile" accept=".json" class="file-hide" tabindex="-1"></div>
       ${mine.length ? `<div class="tpl-grid">${myTemplateCards()}</div>` : `<p class="muted">Design something, then click “Save this design as a template” to reuse it anytime.</p>`}
     </div>
     <h4 id="builtinTitle">Artvas templates</h4>
@@ -1514,7 +1514,6 @@ async function tabTemplates(p) {
   );
   filter();
   $('#saveTpl', p).onclick = openSaveTemplateDialog;
-  $('#tplImport', p).onclick = () => $('#tplImportFile', p).click();
   $('#tplImportFile', p).onchange = async (e) => {
     await importMyTemplates(e.target.files[0]);
     tabTemplates(p);
@@ -1848,12 +1847,11 @@ function applyFrame(kind) {
 function tabUploads(p) {
   p.innerHTML = `
     <h3>Uploads</h3>
-    <button class="btn primary block" id="upBtn">${icon('upload')} Upload images</button>
+    <label class="btn primary block" id="upBtn" for="fileUpload" role="button" tabindex="0">${icon('upload')} Upload images</label>
     <p class="muted">Or drag & drop / paste images onto the canvas. Drag a thumbnail onto the page to place it.</p>
     <div class="img-grid">${state.uploads
       .map((u, i) => `<div class="img-item"><img src="${u}" data-up="${i}" draggable="true" alt=""><button class="rm" data-rm="${i}" title="Remove">${icon('x')}</button></div>`)
       .join('') || '<p class="muted">No uploads yet.</p>'}</div>`;
-  $('#upBtn').onclick = () => $('#fileUpload').click();
   $$('[data-up]', p).forEach((img) => {
     img.onclick = () => addImage(state.uploads[+img.dataset.up]);
     img.ondragstart = (e) => e.dataTransfer.setData('text/artvas-img', state.uploads[+img.dataset.up]);
@@ -1950,14 +1948,13 @@ function tabBackground(p) {
       <button class="btn ghost" id="gApply">Apply</button></div>
     </div>
     <h4>Background image</h4>
-    <button class="btn ghost block" id="bgUpload">${icon('upload')} Upload background image</button>
+    <label class="btn ghost block" id="bgUpload" for="bgFile" role="button" tabindex="0">${icon('upload')} Upload background image</label>
     ${c.backgroundImage ? `<button class="btn ghost block" id="bgRemove">${icon('x')} Remove background image</button>` : ''}
-    <input type="file" id="bgFile" accept="image/*" hidden>
+    <input type="file" id="bgFile" accept="image/*" class="file-hide" tabindex="-1">
     <p class="muted">Tip: in Photos, use the palette button on a photo to set it as background.</p>`;
   bindColorPicker('bgColor', (v) => setBackgroundFill({ color: v }));
   $$('[data-g]', p).forEach((b) => (b.onclick = () => setBackgroundFill({ gradient: GRADIENTS[+b.dataset.g] })));
   $('#gApply').onclick = () => setBackgroundFill({ gradient: [$('#g1').value, $('#g2').value], angle: +$('#gA').value });
-  $('#bgUpload').onclick = () => $('#bgFile').click();
   $('#bgFile').onchange = async (e) => {
     const f = e.target.files[0];
     if (f) setBackgroundImage(await shrinkDataURL(await fileToDataURL(f)));
@@ -2304,6 +2301,7 @@ function bindProps(o, text, img) {
   on('phUpload', 'onclick', () => {
     const inp = document.createElement('input');
     inp.type = 'file';
+    attachPicker(inp);
     inp.accept = 'image/*';
     inp.onchange = async () => {
       const f = inp.files[0];
@@ -2437,6 +2435,7 @@ function bindProps(o, text, img) {
     on('replaceImg', 'onclick', () => {
       const inp = document.createElement('input');
       inp.type = 'file';
+      attachPicker(inp);
       inp.accept = 'image/*';
       inp.onchange = async () => {
         const f = inp.files[0];
@@ -2790,12 +2789,12 @@ function tabBrand(p) {
     <div class="field"><label>Body</label><select id="bfB">${fontOpts(b.bodyFont)}</select></div>
     <div class="row"><button class="btn ghost small" id="bfAddH" style="font-family:'${b.headingFont}'">+ Heading</button><button class="btn ghost small" id="bfAddB" style="font-family:'${b.bodyFont}'">+ Body text</button></div>
     <button class="btn ghost block mt" id="bfApply">${icon('type')} Apply brand fonts to page</button>
-    <button class="btn ghost block" id="bfUpload">${icon('upload')} Upload a font (.ttf .otf .woff)</button>
-    <input type="file" id="bfFile" accept=".ttf,.otf,.woff,.woff2" hidden>
+    <label class="btn ghost block" id="bfUpload" for="bfFile" role="button" tabindex="0">${icon('upload')} Upload a font (.ttf .otf .woff)</label>
+    <input type="file" id="bfFile" accept=".ttf,.otf,.woff,.woff2" class="file-hide" tabindex="-1">
     ${(b.fonts || []).length ? `<div class="muted">Your fonts: ${b.fonts.map((f) => `<span class="tag" style="font-family:'${esc(f.name)}'">${esc(f.name)} <button data-bfrm="${esc(f.name)}">×</button></span>`).join(' ')}</div>` : ''}
     <h4>Logos</h4>
-    <button class="btn ghost block" id="blUpload">${icon('upload')} Upload logo</button>
-    <input type="file" id="blFile" accept="image/*" multiple hidden>
+    <label class="btn ghost block" id="blUpload" for="blFile" role="button" tabindex="0">${icon('upload')} Upload logo</label>
+    <input type="file" id="blFile" accept="image/*" multiple class="file-hide" tabindex="-1">
     <div class="img-grid">${(b.logos || []).map((l, i) => `<div class="img-item logo-item"><img src="${l}" data-bl="${i}" alt=""><button class="rm" data-blrm="${i}">${icon('x')}</button></div>`).join('') || '<p class="muted">No logos yet.</p>'}</div>`;
 
   $('#bcAdd').onchange = (e) => {
@@ -2842,7 +2841,6 @@ function tabBrand(p) {
     pushHistory();
     schedulePersist();
   };
-  $('#bfUpload').onclick = () => $('#bfFile').click();
   $('#bfFile').onchange = async (e) => {
     const f = e.target.files[0];
     if (!f) return;
@@ -2855,7 +2853,6 @@ function tabBrand(p) {
     tabBrand(p);
   };
   $$('[data-bfrm]', p).forEach((x) => (x.onclick = () => { b.fonts = b.fonts.filter((f) => f.name !== x.dataset.bfrm); saveBrand(); tabBrand(p); }));
-  $('#blUpload').onclick = () => $('#blFile').click();
   $('#blFile').onchange = async (e) => {
     for (const f of e.target.files) {
       let url = await fileToDataURL(f);
@@ -3562,3 +3559,13 @@ boot();
 
 // expose a tiny API for debugging/testing
 window.artvas = { video: _videoDebug, openVideo, pickVideoStarter, loadPack, state, addText, addShape, addImage, exportDesign, util, templateThumb, TEMPLATES, FORMATS };
+
+/** Put a file input made in code into the page (visually hidden) so phones open the picker. */
+function attachPicker(inp) {
+  inp.className = 'file-hide';
+  inp.tabIndex = -1;
+  document.body.appendChild(inp);
+  inp.addEventListener('change', () => setTimeout(() => inp.remove(), 1000));
+  // if the picker is closed without choosing, tidy up the next time the page gets focus
+  window.addEventListener('focus', () => setTimeout(() => !inp.files?.length && inp.remove(), 3000), { once: true });
+}
