@@ -12,7 +12,7 @@ import { transcribeMedia, scriptToLines } from './captions.js';
 import { MUSIC_STYLES, SFX, renderMusic, renderSfx } from './music.js';
 import { VOICES, speak, ONLINE_LANGS, speakOnline } from './tts.js';
 import { fontsIn } from './fonts.js';
-import { VIDEO_FX, BODY_FX, FX_CATS, COLOR_FX, fxName, applyVideoFx, applyBodyFx, segmentCanvas, loadSegmenter, segState, fxThumb } from './vfx.js';
+import { VIDEO_FX, BODY_FX, FX_CATS, COLOR_FX, fxName, applyVideoFx, applyBodyFx, segmentCanvas, loadSegmenter, segState, fxThumb, loadFxSamples, fxSamplesReady, drawSample, drawFxFrame, bindCardPreview } from './vfx.js';
 
 export const VIDEO_PRESETS = [
   { id: 'tiktok', name: 'TikTok', w: 1080, h: 1920, color: '#111111', hint: '9:16 · up to 10 min' },
@@ -2357,51 +2357,51 @@ function renderEffectsPanel(p) {
       ? `<div class="chips mt">${FX_CATS.map((c) => `<button class="chip ${c === cat ? 'on' : ''}" data-fcat="${c}">${c}</button>`).join('')}</div>`
       : `<p class="muted mt" id="segStatus">${segStatusText()}</p>`}
     ${sel ? `<p class="fx-hint">Tap an effect to replace <b>${H.esc(fxName(sel.fx))}</b>. <button class="linkish" id="fxNew">Add a new layer instead</button></p>` : `<p class="muted">Tap an effect to add it at the playhead. It applies to everything under it on the timeline.</p>`}
-    <div class="fx-grid">${list.map((f) => `<button class="fx-card ${sel?.fx === f.id ? 'on' : ''}" data-fx-add="${f.id}" title="${H.esc(f.name)}"><img src="${fxThumb(f.id, sec)}" alt=""><span>${H.esc(f.name)}</span></button>`).join('')}</div>`;
+    <p class="muted small-note">${H.isMobile() ? 'Press and hold a preview to see it move.' : 'Point at a preview to see it move.'}</p>
+    <div class="fx-grid">${list.map((f) => `<button class="fx-card ${sel?.fx === f.id ? 'on' : ''}" data-fx-add="${f.id}" title="${H.esc(f.name)}"><span class="fx-pic"><img src="${fxThumb(f.id, sec)}" alt=""></span><span>${H.esc(f.name)}</span></button>`).join('')}</div>`;
+  if (!fxSamplesReady()) loadFxSamples().then(() => V && V.tab === 'effects' && renderEffectsPanel(p)).catch(() => {});
   $$('[data-fsec]', p).forEach((b) => (b.onclick = () => { V.fxSec = b.dataset.fsec; if (V.fxSec === 'body') warmSegmenter(); renderEffectsPanel(p); }));
   $$('[data-fcat]', p).forEach((b) => (b.onclick = () => { V.fxCat = b.dataset.fcat; renderEffectsPanel(p); }));
-  $$('[data-fx-add]', p).forEach((b) => (b.onclick = () => { addEffectLayer(sec, b.dataset.fxAdd); renderEffectsPanel(p); }));
+  $$('[data-fx-add]', p).forEach((b) => {
+    b.onclick = () => { addEffectLayer(sec, b.dataset.fxAdd); renderEffectsPanel(p); };
+    // loop the effect on the sample photo (3 s, or 3.6 s for the countdown)
+    const id = b.dataset.fxAdd;
+    bindCardPreview(b, (g, w, h, t) => drawFxFrame(g, w, h, sec, id, t % (id === 'countdown' ? 3.6 : 3)));
+  });
   const nw = $('#fxNew', p);
   if (nw) nw.onclick = () => { select(null); renderEffectsPanel(p); };
 }
 
 const transThumbs = new Map();
+const sampleCanvases = new Map();
 function sampleFrame(i, w, h) {
+  const key = `${i}:${w}x${h}`;
+  if (sampleCanvases.has(key)) return sampleCanvases.get(key);
   const c = document.createElement('canvas');
   c.width = w;
   c.height = h;
-  const g = c.getContext('2d');
-  const gr = g.createLinearGradient(0, 0, w, h);
-  gr.addColorStop(0, i ? '#0ea5e9' : '#f97316');
-  gr.addColorStop(1, i ? '#4f46e5' : '#db2777');
-  g.fillStyle = gr;
-  g.fillRect(0, 0, w, h);
-  g.fillStyle = 'rgba(255,255,255,0.9)';
-  g.font = `800 ${Math.round(w * 0.5)}px "DM Sans", sans-serif`;
-  g.textAlign = 'center';
-  g.textBaseline = 'middle';
-  g.fillText(i ? 'B' : 'A', w / 2, h / 2);
+  drawSample(c.getContext('2d'), w, h, i);
+  sampleCanvases.set(key, c);
   return c;
 }
-/** Picture of a transition halfway through, using two sample frames. */
-function transThumb(type) {
-  if (transThumbs.has(type)) return transThumbs.get(type);
-  const w = 96;
-  const h = 128;
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  const g = c.getContext('2d');
-  const base = { type: 'image', dur: 1, speed: 1, fit: 'fill', filter: 'none', adjust: {}, effect: 'none' };
-  const a = { ...base, id: '__ta' };
-  const b = { ...base, id: '__tb', transition: { type, dur: 1 } };
+/**
+ * One frame of a transition between the two sample photos.
+ * t: 0–1 shows photo A, 1–2 is the transition, 2–3 shows photo B.
+ */
+function drawTransFrame(g, w, h, type, t) {
+  const base = { type: 'image', speed: 1, fit: 'fill', filter: 'none', adjust: {}, effect: 'none' };
+  const a = { ...base, id: '__ta', dur: 1 };
+  const b = { ...base, id: '__tb', dur: 2, transition: { type, dur: 1 } };
   const saved = { clips: V.p.clips, els: V.els, effects: V.p.effects };
   V.p.clips = [a, b];
   V.p.effects = [];
   V.els = new Map([['__ta', sampleFrame(0, w, h)], ['__tb', sampleFrame(1, w, h)]]);
   try {
-    if (type === 'none') drawClipWithTransition(g, w, h, 0.5);
-    else drawClipWithTransition(g, w, h, 1.42);
+    g.save();
+    g.fillStyle = '#000';
+    g.fillRect(0, 0, w, h);
+    drawClipWithTransition(g, w, h, clamp(t, 0, 2.99));
+    g.restore();
   } catch (e) {
     console.error(e);
   } finally {
@@ -2409,9 +2409,28 @@ function transThumb(type) {
     V.p.effects = saved.effects;
     V.els = saved.els;
   }
-  const url = c.toDataURL('image/jpeg', 0.8);
+}
+/** Still picture of a transition partway through ('' until the sample photos have loaded). */
+function transThumb(type) {
+  if (!fxSamplesReady()) return '';
+  if (transThumbs.has(type)) return transThumbs.get(type);
+  const w = 120;
+  const h = 160;
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  drawTransFrame(c.getContext('2d'), w, h, type, type === 'none' ? 0.5 : 1.42);
+  const url = c.toDataURL('image/jpeg', 0.82);
   transThumbs.set(type, url);
   return url;
+}
+/** Loop: photo A, the transition, photo B. */
+function bindTransPreview(card, type) {
+  bindCardPreview(card, (g, w, h, t) => {
+    const k = t % 2.8;
+    // 0.6 s of A, 1 s transition, then B
+    drawTransFrame(g, w, h, type, k < 0.6 ? 0.5 : k < 1.6 ? 1 + (k - 0.6) : 2.5);
+  });
 }
 function openTransitions(i) {
   V.trIdx = i;
@@ -2428,7 +2447,9 @@ function renderTransitionsPanel(p) {
   const n = V.p.clips.length;
   if (n < 2) {
     p.innerHTML = `<h3>Transitions</h3><p class="muted">Add two or more clips to the timeline. A transition plays where one clip changes to the next.</p>
-      <div class="fx-grid">${TRANSITIONS.filter(([id]) => id !== 'none').map(([id, l]) => `<div class="fx-card dim"><img src="${transThumb(id)}" alt=""><span>${l}</span></div>`).join('')}</div>`;
+      <div class="fx-grid">${TRANSITIONS.filter(([id]) => id !== 'none').map(([id, l]) => `<div class="fx-card dim" data-tr-demo="${id}"><span class="fx-pic"><img src="${transThumb(id)}" alt=""></span><span>${l}</span></div>`).join('')}</div>`;
+    $$('[data-tr-demo]', p).forEach((b) => bindTransPreview(b, b.dataset.trDemo));
+    if (!fxSamplesReady()) loadFxSamples().then(() => V && V.tab === 'transitions' && renderTransitionsPanel(p)).catch(() => {});
     return;
   }
   const starts = clipStarts();
@@ -2447,12 +2468,15 @@ function renderTransitionsPanel(p) {
       <div><b>Cut ${i} of ${n - 1}</b><small class="muted">Clip ${i} → clip ${i + 1} · at ${fmt(starts[i])}</small></div>
       <button class="icon-btn" id="trNext" ${i >= n - 1 ? 'disabled' : ''} title="Next cut">${H.icon('chevRight')}</button></div>
     <p class="muted">Tap a transition to use it at this cut. You can also tap the ＋ between clips on the timeline.</p>
-    <div class="fx-grid">${TRANSITIONS.map(([id, l]) => `<button class="fx-card ${cur === id ? 'on' : ''}" data-tr-set="${id}"><img src="${transThumb(id)}" alt=""><span>${l}</span></button>`).join('')}</div>
+    <p class="muted small-note">${H.isMobile() ? 'Press and hold a preview to see it play.' : 'Point at a preview to see it play.'}</p>
+    <div class="fx-grid">${TRANSITIONS.map(([id, l]) => `<button class="fx-card ${cur === id ? 'on' : ''}" data-tr-set="${id}"><span class="fx-pic"><img src="${transThumb(id)}" alt=""></span><span>${l}</span></button>`).join('')}</div>
     <div class="field mt"><label>Length <b>${dur.toFixed(1)}s</b></label><input type="range" id="trDur" min="0.2" max="2" step="0.1" value="${dur}"></div>
     <div class="row wrap"><button class="btn ghost small" id="trAll">Use at every cut</button><button class="btn ghost small" id="trRandom">Mix it up (random)</button><button class="btn ghost small" id="trNone">Remove all</button></div>`;
   const play = () => previewRange(starts[i] - 0.7, starts[i] + (c.transition?.dur || 0.5) + 0.6);
   $('#trPrev', p).onclick = () => openTransitions(i - 1);
   $('#trNext', p).onclick = () => openTransitions(i + 1);
+  if (!fxSamplesReady()) loadFxSamples().then(() => V && V.tab === 'transitions' && renderTransitionsPanel(p)).catch(() => {});
+  $$('[data-tr-set]', p).forEach((b) => b.dataset.trSet !== 'none' && bindTransPreview(b, b.dataset.trSet));
   $$('[data-tr-set]', p).forEach((b) => (b.onclick = () => {
     c.transition = { type: b.dataset.trSet, dur };
     commit();

@@ -964,70 +964,158 @@ export function applyBodyFx(g, W, H, id, o, mk) {
   g.restore();
 }
 
-// ---------- thumbnails ----------
-function sampleScene(g, w, h) {
-  const gr = g.createLinearGradient(0, 0, 0, h);
-  gr.addColorStop(0, '#6d28d9');
-  gr.addColorStop(0.6, '#f472b6');
-  gr.addColorStop(1, '#fb923c');
-  g.fillStyle = gr;
-  g.fillRect(0, 0, w, h);
-  g.fillStyle = 'rgba(255,240,200,0.9)';
-  g.beginPath();
-  g.arc(w * 0.78, h * 0.2, w * 0.12, 0, Math.PI * 2);
-  g.fill();
-  g.fillStyle = '#312e81';
-  g.fillRect(0, h * 0.82, w, h * 0.18);
-  drawPerson(g, w, h, '#0ea5e9', '#fcd34d');
+// ---------- previews on sample photos ----------
+// Two sample photos of people (made with the free image AI for Artvas) with person masks worked out
+// ahead of time, so body-effect previews work even before the segmenter has loaded.
+const SAMPLE_FILES = ['fx-a', 'fx-b'];
+let samples = null;
+let samplesP = null;
+function loadImg(src) {
+  return new Promise((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => reject(new Error('Could not load ' + src));
+    im.src = src;
+  });
 }
-function drawPerson(g, w, h, body, head) {
-  g.fillStyle = body;
-  g.beginPath();
-  g.roundRect(w * 0.3, h * 0.5, w * 0.4, h * 0.6, w * 0.16);
-  g.fill();
-  g.fillStyle = head;
-  g.beginPath();
-  g.arc(w * 0.5, h * 0.38, w * 0.12, 0, Math.PI * 2);
-  g.fill();
+/** Load the sample photos and their person masks (small, cached by the browser). */
+export function loadFxSamples() {
+  if (samples) return Promise.resolve(samples);
+  if (!samplesP) {
+    samplesP = Promise.all(
+      SAMPLE_FILES.map(async (n) => {
+        const base = new URL(`samples/${n}`, document.baseURI).href;
+        const [img, m] = await Promise.all([loadImg(`${base}.jpg`), loadImg(`${base}-mask.png`)]);
+        const c = document.createElement('canvas');
+        c.width = m.width;
+        c.height = m.height;
+        const g = c.getContext('2d', { willReadFrequently: true });
+        g.drawImage(m, 0, 0);
+        const d = g.getImageData(0, 0, m.width, m.height).data;
+        const conf = new Float32Array(m.width * m.height);
+        for (let i = 0; i < conf.length; i++) conf[i] = d[i * 4 + 3] / 255;
+        const mk = maskFromConfidence(conf, m.width, m.height);
+        // keep a private copy: the scratch mask canvas is reused by live person detection
+        const own = document.createElement('canvas');
+        own.width = m.width;
+        own.height = m.height;
+        own.getContext('2d').drawImage(mk.c, 0, 0);
+        return { img, mk: { ...mk, c: own } };
+      })
+    )
+      .then((list) => (samples = list))
+      .catch((e) => {
+        samplesP = null;
+        throw e;
+      });
+  }
+  return samplesP;
 }
-let sampleMask;
-function sampleMaskFor(w, h) {
-  if (sampleMask && sampleMask.w === w && sampleMask.h === h) return sampleMask;
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  const g = c.getContext('2d', { willReadFrequently: true });
-  drawPerson(g, w, h, '#fff', '#fff');
-  const d = g.getImageData(0, 0, w, h).data;
-  const conf = new Float32Array(w * h);
-  for (let i = 0; i < conf.length; i++) conf[i] = d[i * 4 + 3] / 255;
-  const mk = maskFromConfidence(conf, w, h);
-  // keep a private copy: the scratch mask canvas is reused by live segmentation
-  const own = document.createElement('canvas');
-  own.width = w;
-  own.height = h;
-  own.getContext('2d').drawImage(mk.c, 0, 0);
-  sampleMask = { ...mk, c: own, w, h };
-  return sampleMask;
+export const fxSamplesReady = () => !!samples;
+/** Draw sample photo i to cover a w×h canvas. */
+export function drawSample(g, w, h, i = 0) {
+  const s = samples?.[i];
+  if (!s) {
+    g.fillStyle = '#2a2340';
+    g.fillRect(0, 0, w, h);
+    return;
+  }
+  const im = s.img;
+  const k = Math.max(w / im.width, h / im.height);
+  g.drawImage(im, (w - im.width * k) / 2, (h - im.height * k) / 2, im.width * k, im.height * k);
+}
+/** Draw an effect on a sample photo at time t (seconds into the effect). */
+export function drawFxFrame(g, w, h, kind, id, t, i = 0) {
+  g.save();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalAlpha = 1;
+  g.globalCompositeOperation = 'source-over';
+  g.filter = 'none';
+  drawSample(g, w, h, i);
+  g.restore();
+  const o = { local: t, dur: 3, amt: 1 };
+  try {
+    if (kind === 'body') applyBodyFx(g, w, h, id, o, samples?.[i]?.mk);
+    else applyVideoFx(g, w, h, id, o);
+  } catch (e) {
+    console.error(e);
+  }
 }
 const thumbCache = new Map();
-/** Small preview image of an effect on a sample picture. */
-export function fxThumb(id, kind, w = 96, h = 128) {
+/** Still preview of an effect on the sample photo ('' until the photos have loaded). */
+export function fxThumb(id, kind, w = 120, h = 160) {
+  if (!samples) return '';
   const key = `${kind}:${id}:${w}x${h}`;
   if (thumbCache.has(key)) return thumbCache.get(key);
   const c = document.createElement('canvas');
   c.width = w;
   c.height = h;
-  const g = c.getContext('2d');
-  sampleScene(g, w, h);
-  const o = { local: id === 'countdown' ? 0.4 : id === 'glitch' || id === 'bodyglitch' ? 0.1 : 0.7, dur: 3, amt: 1 };
-  try {
-    if (kind === 'body') applyBodyFx(g, w, h, id, o, sampleMaskFor(w, h));
-    else applyVideoFx(g, w, h, id, o);
-  } catch (e) {
-    console.error(e);
-  }
-  const url = c.toDataURL('image/jpeg', 0.8);
+  const t = id === 'countdown' ? 0.4 : id === 'glitch' || id === 'bodyglitch' ? 0.1 : id === 'flash' ? 0.02 : 0.7;
+  drawFxFrame(c.getContext('2d'), w, h, kind, id, t);
+  const url = c.toDataURL('image/jpeg', 0.82);
   thumbCache.set(key, url);
   return url;
+}
+
+/**
+ * Play a preview on a card while it is hovered or pressed.
+ * draw(g, w, h, t) paints one frame at time t (seconds since the preview started).
+ */
+export function bindCardPreview(card, draw, { w = 120, h = 160 } = {}) {
+  let raf = 0;
+  let cv = null;
+  let t0 = 0;
+  const frame = (ts) => {
+    if (!t0) t0 = ts;
+    draw(cv.getContext('2d'), w, h, (ts - t0) / 1000);
+    raf = requestAnimationFrame(frame);
+  };
+  const start = () => {
+    if (raf || !samples) return;
+    const img = card.querySelector('img');
+    if (!img) return;
+    cv = document.createElement('canvas');
+    cv.width = w;
+    cv.height = h;
+    cv.className = 'fx-live';
+    img.after(cv);
+    t0 = 0;
+    raf = requestAnimationFrame(frame);
+  };
+  const stop = () => {
+    cancelAnimationFrame(raf);
+    raf = 0;
+    cv?.remove();
+    cv = null;
+  };
+  // touch: press and hold to watch; lifting after a long press doesn't apply the effect
+  let downAt = 0;
+  card.addEventListener('pointerenter', (e) => e.pointerType === 'mouse' && start());
+  card.addEventListener('pointerleave', stop);
+  card.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse') return;
+    downAt = Date.now();
+    start();
+  });
+  card.addEventListener('pointerup', (e) => {
+    if (e.pointerType === 'mouse') return;
+    if (Date.now() - downAt > 400) card.dataset.held = '1';
+    stop();
+  });
+  card.addEventListener(
+    'click',
+    (e) => {
+      if (card.dataset.held) {
+        delete card.dataset.held;
+        e.stopImmediatePropagation();
+        e.preventDefault();
+      }
+    },
+    true
+  );
+  card.addEventListener('contextmenu', (e) => downAt && e.preventDefault());
+  card.addEventListener('pointercancel', stop);
+  card.addEventListener('focus', start);
+  card.addEventListener('blur', stop);
+  return stop;
 }

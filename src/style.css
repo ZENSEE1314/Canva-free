@@ -633,3 +633,15 @@ kbd { background: #f1f0f5; border: 1px solid var(--line); border-bottom-width: 2
   .fx-grid { grid-template-columns: repeat(4, 1fr); gap: 6px; }
 }
 .seg.full button .ic { display: inline-block; vertical-align: -3px; margin-right: 4px; }
+
+.fx-pic { position: relative; display: block; border-radius: 10px; overflow: hidden; }
+.fx-card .fx-pic img { border-radius: 0; }
+.fx-card.on .fx-pic { box-shadow: 0 0 0 3px var(--brand); }
+.fx-card.on .fx-pic img { box-shadow: none; }
+.fx-card img[src=""] { visibility: hidden; }
+.fx-pic { aspect-ratio: 3 / 4; background: #2a2340; }
+.fx-pic:has(img[src=""]) { background: linear-gradient(110deg, #2a2340 30%, #3a3156 50%, #2a2340 70%) 0 0 / 200% 100%; animation: fxShimmer 1.2s linear infinite; }
+.fx-live { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.small-note { font-size: 12px; margin: 4px 0 0; }
+@keyframes fxShimmer { to { background-position: -200% 0; } }
+.fx-card { -webkit-touch-callout: none; user-select: none; }
