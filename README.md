@@ -82,7 +82,7 @@ npm start          # serve dist/ on $PORT (default 3000)
 ## Deploy on Railway
 
 1. Go to [railway.com](https://railway.com) → **New Project** → **Deploy from GitHub repo** → choose this repository.
-2. Railway reads `railway.json`. It builds with `npm ci && npm run build`, starts with `npm start`, and checks health at `/health`.
+2. Railway reads `railway.json`. It installs packages, builds with `npm run build`, starts with `npm start`, and checks health at `/health`.
 3. Open the service → **Settings** → **Networking** → **Generate Domain** to get a public URL.
 
 You don't need any environment variables. Railway sets `PORT` automatically.
