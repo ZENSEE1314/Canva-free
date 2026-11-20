@@ -5,7 +5,7 @@ let dbPromise;
 function openDB() {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, 2);
+      const req = indexedDB.open(DB_NAME, 3);
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains('designs')) db.createObjectStore('designs', { keyPath: 'id' });
@@ -14,6 +14,7 @@ function openDB() {
           v.createIndex('designId', 'designId');
         }
         if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
+        if (!db.objectStoreNames.contains('media')) db.createObjectStore('media', { keyPath: 'id' });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -39,7 +40,9 @@ function tx(storeName, mode, fn) {
 export const saveDesign = (design) => tx('designs', 'readwrite', (s) => s.put(design));
 export const getDesign = (id) => tx('designs', 'readonly', (s) => s.get(id));
 export async function deleteDesign(id) {
+  const d = await getDesign(id).catch(() => null);
   await tx('designs', 'readwrite', (s) => s.delete(id));
+  if (d?.kind === 'video' && d.mediaIds?.length) await tx('media', 'readwrite', (s) => d.mediaIds.forEach((m) => s.delete(m)));
   const versions = await listVersions(id);
   await tx('versions', 'readwrite', (s) => versions.forEach((v) => s.delete(v.id)));
 }
@@ -64,6 +67,10 @@ export async function saveVersion(design, label = '') {
 }
 export const getVersion = (id) => tx('versions', 'readonly', (s) => s.get(id));
 export const deleteVersion = (id) => tx('versions', 'readwrite', (s) => s.delete(id));
+
+// Media files (video, audio, images) for video projects
+export const saveMedia = (m) => tx('media', 'readwrite', (s) => s.put(m));
+export const getMedia = (id) => tx('media', 'readonly', (s) => s.get(id));
 
 // Key/value settings (brand kit, etc.)
 export const kvGet = (key) => tx('kv', 'readonly', (s) => s.get(key));

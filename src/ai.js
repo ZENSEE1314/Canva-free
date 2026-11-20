@@ -15,6 +15,14 @@ export const AI_MODELS = [
   { id: 'flux-dev-image', name: 'Flux Dev', ar: null },
 ];
 
+export const VIDEO_MODELS = [
+  { id: 'seedance-lite-t2v', name: 'Seedance Lite — cheapest', ar: ['16:9', '9:16', '1:1', '4:3', '3:4'], durations: [5] },
+  { id: 'wan2.5-text-to-video-fast', name: 'Wan 2.5 Fast', ar: ['16:9', '9:16'], durations: [5] },
+  { id: 'kling-v2.5-turbo-pro-t2v', name: 'Kling 2.5 Turbo', ar: ['16:9', '9:16', '1:1'], durations: [5] },
+  { id: 'pixverse-v5-t2v', name: 'PixVerse 5', ar: ['16:9', '9:16', '1:1', '4:3', '3:4'], durations: [5] },
+  { id: 'veo3-fast-text-to-video', name: 'Veo 3 Fast — with sound', ar: ['16:9', '9:16'], durations: [8] },
+];
+
 export const AI_STYLES = [
   { id: 'none', label: 'No style', suffix: '' },
   { id: 'photo', label: 'Photo', suffix: ', professional photography, natural light, sharp focus, high detail' },
@@ -71,12 +79,17 @@ async function check(r) {
   throw new Error(`AI service error ${r.status}${t ? ': ' + t.slice(0, 120) : ''}`);
 }
 
+/** Generate one video clip. Returns a video URL. */
+export async function generateVideo({ model, prompt, aspectRatio, duration, onStatus }) {
+  return generateImage({ model, prompt, aspectRatio, onStatus, extra: duration ? { duration } : {}, polls: 180 });
+}
+
 /** Generate one image. Returns an image URL. */
-export async function generateImage({ model, prompt, aspectRatio, onStatus }) {
+export async function generateImage({ model, prompt, aspectRatio, onStatus, extra = {}, polls = 90 }) {
   const key = getKey();
   if (!key) throw new Error('Add your Muapi API key first.');
   const viaRelay = await useRelay();
-  const body = { prompt, image_url: null };
+  const body = { prompt, image_url: null, ...extra };
   if (aspectRatio) body.aspect_ratio = aspectRatio;
   const submitUrl = viaRelay ? `api/muapi/generate/${model}` : `https://api.muapi.ai/api/v1/${model}`;
   onStatus?.('Sending…');
@@ -90,7 +103,7 @@ export async function generateImage({ model, prompt, aspectRatio, onStatus }) {
   const id = sub.request_id || sub.id;
   let result = sub;
   if (id) {
-    for (let i = 0; i < 90; i++) {
+    for (let i = 0; i < polls; i++) {
       await new Promise((r) => setTimeout(r, 2000));
       onStatus?.(`Generating… ${i * 2}s`);
       const url = viaRelay ? `api/muapi/result/${id}` : `https://api.muapi.ai/api/v1/predictions/${id}/result`;
@@ -108,11 +121,11 @@ export async function generateImage({ model, prompt, aspectRatio, onStatus }) {
         break;
       }
       if (['failed', 'error'].includes(st)) throw new Error('Generation failed: ' + (data.error || 'unknown error'));
-      if (i === 89) throw new Error('Generation timed out. Try again or pick a faster model.');
+      if (i === polls - 1) throw new Error('Generation timed out. Try again or pick a faster model.');
     }
   }
   const out = result.outputs?.[0] || result.url || result.output?.url;
-  if (!out) throw new Error('The AI service returned no image.');
+  if (!out) throw new Error('The AI service returned no result.');
   return out;
 }
 
@@ -135,4 +148,17 @@ export async function toDataURL(url) {
     if (await useRelay()) return tryFetch(`api/image-proxy?url=${encodeURIComponent(url)}`);
     return url;
   }
+}
+
+/** Download a generated media file (video or image) as a Blob, via the relay when needed. */
+export async function fetchMediaBlob(url) {
+  try {
+    const r = await fetch(url);
+    if (r.ok) return await r.blob();
+  } catch {}
+  if (await useRelay()) {
+    const r = await fetch(`api/image-proxy?url=${encodeURIComponent(url)}`);
+    if (r.ok) return r.blob();
+  }
+  throw new Error('Could not download the generated file.');
 }

@@ -58,9 +58,9 @@ app.get('/api/image-proxy', async (req, res) => {
   try {
     const r = await fetch(url, { redirect: 'follow' });
     const type = r.headers.get('content-type') || '';
-    if (!r.ok || !type.startsWith('image/')) return res.status(415).end();
+    if (!r.ok || !(type.startsWith('image/') || type.startsWith('video/') || type === 'application/octet-stream')) return res.status(415).end();
     const buf = Buffer.from(await r.arrayBuffer());
-    if (buf.length > 25 * 1024 * 1024) return res.status(413).end();
+    if (buf.length > 200 * 1024 * 1024) return res.status(413).end();
     res.type(type).set('Cache-Control', 'private, max-age=3600').send(buf);
   } catch {
     res.status(502).end();

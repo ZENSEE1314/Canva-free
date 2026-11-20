@@ -1,6 +1,18 @@
 # Artvas
 
-Artvas is a free design editor that runs in the browser. Use it to make social posts, posters, presentations, cards and more.
+Artvas is a free all-in-one creative studio that runs in the browser. It has a design editor for social posts, posters and presentations, a timeline video editor for TikTok, Instagram Reels, Xiaohongshu (RED), Facebook and YouTube, and AI image and video generation.
+
+## Video editor
+
+- **Platform presets**: TikTok, Instagram Reels, Xiaohongshu / RED (3:4), Facebook Reels and feed (4:5), YouTube Shorts, YouTube (16:9) and square.
+- **Starter layouts**: Hook + captions, Vlog intro, Product promo, How-to steps, RED note cover, and Quote / lyrics.
+- **Timeline**: a main video track, overlay tracks for text and stickers, and audio tracks. Drag clips to reorder them, drag edges to trim, split at the playhead (S), duplicate, delete and undo/redo. Use the zoom buttons to zoom the timeline.
+- **Clips**: speed (0.25×–3×), volume and mute, fill frame or fit with a blurred background, 8 filters plus brightness, contrast and saturation, and 9 transitions (crossfade, dip to black, flash, slide, push, zoom, wipe, blur).
+- **Text and stickers**: 9 text styles (title, caption, outline, highlight, neon, lower third…), emoji stickers and the 3D graphics library. Drag them on the video to move them and drag the corner to resize. Each has in and out animations (fade, pop, slide, zoom, typewriter).
+- **Audio**: add music and voice-overs with volume and fade in/out. Clip sound is mixed in automatically.
+- **Designs as slides**: turn any Artvas design into a video slide, one clip per page.
+- **AI**: generate image clips, or video clips with Seedance, Wan, Kling, PixVerse or Veo 3, using your own Muapi key.
+- **Export**: MP4 (or WebM) at 480p, 720p or 1080p, with mixed audio. Projects and media are saved in your browser (IndexedDB).
 
 ## Features
 

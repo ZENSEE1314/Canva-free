@@ -15,7 +15,8 @@ import {
   PACK_CATS, loadPack, flatSrc, loadIcons, POPULAR_ICONS, iconSVG, createIcon, CHART_PRESETS, buildChart, TABLE_PRESETS, buildTable,
   GRIDS, buildGrid, gridPreview, FRAMES, buildFrame, GRADIENT_ELEMENTS, buildGradientElement, gradientPreview,
 } from './library.js';
-import { AI_MODELS, AI_STYLES, closestRatio, getKey, setKey, generateImage, toDataURL } from './ai.js';
+import { AI_MODELS, AI_STYLES, closestRatio, getKey, setKey, generateImage, toDataURL, fetchMediaBlob } from './ai.js';
+import { openVideoEditor, closeVideoEditor, newVideoProject, VIDEO_PRESETS, VIDEO_STARTERS, applyStarter, _videoDebug } from './video.js';
 import { icon } from './icons.js';
 
 const PROPS = [
@@ -84,6 +85,7 @@ async function ensureFont(family, weight = '400', style = 'normal') {
 // HOME SCREEN
 // =====================================================
 async function renderHome() {
+  closeVideoEditor();
   state.canvas?.dispose();
   state.canvas = null;
   state.design = null;
@@ -99,15 +101,28 @@ async function renderHome() {
       </div>
     </header>
     <section class="hero">
-      <h1>What will you design today?</h1>
-      <p>Free design editor for social posts, posters, presentations, cards and more — right in your browser.</p>
+      <h1>Create anything. Design, video & AI in one studio.</h1>
+      <p>Make posts, posters and presentations, edit videos for TikTok, Reels, RED and YouTube, and generate images with AI — free, in your browser.</p>
+      <div class="mode-cards">
+        <button class="mode-card" data-mode="design"><span class="mc-ic">${icon('layout', 22)}</span><b>Design</b><small>Posts, posters, slides</small></button>
+        <button class="mode-card" data-mode="video"><span class="mc-ic">${icon('film', 22)}</span><b>Video</b><small>Edit clips, text & music</small></button>
+        <button class="mode-card" data-mode="ai"><span class="mc-ic">${icon('wand', 22)}</span><b>AI Image</b><small>Describe it, get it</small></button>
+      </div>
       <div class="custom-size">
         <input type="number" id="cw" value="1080" min="16" max="8000"> <span>×</span>
         <input type="number" id="ch" value="1080" min="16" max="8000"> <span>px</span>
         <button class="btn primary" id="newCustom">Create custom size</button>
       </div>
     </section>
-    <section class="home-section">
+    <section class="home-section" id="videoSection">
+      <h2>Make a video</h2>
+      <div class="vpresets">
+        ${VIDEO_PRESETS.map((p, i) => `<button class="vpreset" data-vp="${i}" style="--pc:${p.color}">
+          <div class="vp-frame"><div style="aspect-ratio:${p.w}/${p.h}"><span>${icon('play', 18)}</span></div></div>
+          <b>${esc(p.name)}</b><small>${p.w} × ${p.h} · ${esc(p.hint)}</small></button>`).join('')}
+      </div>
+    </section>
+    <section class="home-section" id="designSection">
       <h2>Start a new design</h2>
       <div class="presets">
         ${SIZE_PRESETS.map(
@@ -144,10 +159,10 @@ async function renderHome() {
               .map(
                 (d) => `
             <div class="design-card" data-id="${d.id}">
-              <div class="thumb">${d.pages?.[0]?.thumb ? `<img src="${d.pages[0].thumb}" alt="">` : ''}</div>
-              <div class="meta"><b>${esc(d.name || 'Untitled')}</b><small>${d.width}×${d.height} · ${d.pages?.length || 1} page(s) · ${new Date(d.updatedAt).toLocaleString()}</small></div>
+              <div class="thumb">${(d.kind === 'video' ? d.thumb : d.pages?.[0]?.thumb) ? `<img src="${d.kind === 'video' ? d.thumb : d.pages[0].thumb}" alt="">` : ''}${d.kind === 'video' ? `<span class="kind-badge">${icon('play', 12)} Video</span>` : ''}</div>
+              <div class="meta"><b>${esc(d.name || 'Untitled')}</b><small>${d.width}×${d.height} · ${d.kind === 'video' ? `${d.clips?.length || 0} clip(s)` : `${d.pages?.length || 1} page(s)`} · ${new Date(d.updatedAt).toLocaleString()}</small></div>
               <div class="card-actions">
-                <button class="icon-btn" data-dup="${d.id}" title="Duplicate">${icon('copy')}</button>
+                ${d.kind === 'video' ? '' : `<button class="icon-btn" data-dup="${d.id}" title="Duplicate">${icon('copy')}</button>`}
                 <button class="icon-btn danger" data-del="${d.id}" title="Delete">${icon('trash')}</button>
               </div>
             </div>`
@@ -173,6 +188,16 @@ async function renderHome() {
   $('#newCustom').onclick = custom;
   $('#newCustomTop').onclick = () => newDesign(1080, 1080, 'Instagram Post');
   $('#openFile').onchange = (e) => importDesignFile(e.target.files[0]);
+  $$('[data-vp]').forEach((b) => (b.onclick = () => pickVideoStarter(VIDEO_PRESETS[+b.dataset.vp])));
+  $$('[data-mode]').forEach((b) =>
+    (b.onclick = async () => {
+      const m = b.dataset.mode;
+      if (m === 'video') return $('#videoSection').scrollIntoView({ behavior: 'smooth' });
+      if (m === 'design') return $('#designSection').scrollIntoView({ behavior: 'smooth' });
+      state.tab = 'ai';
+      await newDesign(1080, 1080, 'AI image');
+    })
+  );
   bindMyTemplateCards(app, (id) => newDesignFromMyTemplate(id), renderHome);
   $$('[data-t]').forEach((b) =>
     b.addEventListener('click', () => {
@@ -231,7 +256,7 @@ function lazyThumbs(imgs, render) {
 }
 
 function logoSvg() {
-  return `<svg viewBox="0 0 64 64" width="30" height="30"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff7a45"/><stop offset="1" stop-color="#7c3aed"/></linearGradient></defs><rect width="64" height="64" rx="16" fill="url(#lg)"/><path d="M20 46 32 16l12 30M24.5 36h15" stroke="#fff" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  return `<svg viewBox="0 0 64 64" width="30" height="30" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff7a45"/><stop offset=".55" stop-color="#e2489a"/><stop offset="1" stop-color="#6d28d9"/></linearGradient></defs><rect width="64" height="64" rx="18" fill="url(#lg)"/><path d="M17 48 32 14l15 34" stroke="#fff" stroke-width="6.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M27.5 33.5v10l9-5z" fill="#fff"/></svg>`;
 }
 
 function blankPage() {
@@ -248,7 +273,63 @@ async function newDesign(w, h, name, templateIndex) {
 async function openDesign(id) {
   const d = await getDesign(id);
   if (!d) return renderHome();
+  if (d.kind === 'video') return openVideo(d);
   openEditor(d);
+}
+
+// =====================================================
+// VIDEO MODE
+// =====================================================
+function videoHelpers() {
+  return {
+    app, icon, esc, toast, logoSvg, isMobile, setKey, download,
+    goHome: renderHome,
+    listDesigns: () => listDesigns().catch(() => []),
+    fetchMedia: fetchMediaBlob,
+    designPageToBlob,
+  };
+}
+async function openVideo(project) {
+  state.canvas?.dispose();
+  state.canvas = null;
+  state.design = null;
+  try { history.replaceState(null, '', `#/video/${project.id}`); } catch {}
+  await openVideoEditor(project, videoHelpers());
+}
+function pickVideoStarter(preset) {
+  const modal = document.createElement('div');
+  modal.className = 'modal-back';
+  modal.innerHTML = `<div class="modal">
+    <div class="row"><h3>${esc(preset.name)} video</h3><span class="spacer"></span><button class="icon-btn" data-x>${icon('x')}</button></div>
+    <p class="muted">${preset.w} × ${preset.h}. Start blank or pick a starter layout — you can change everything later.</p>
+    <div class="starter-grid">
+      <button class="starter" data-st=""><b>Blank video</b><small>Just your clips</small></button>
+      ${VIDEO_STARTERS.map((st) => `<button class="starter" data-st="${st.id}"><b>${esc(st.name)}</b><small>${st.overlays.length} text layer${st.overlays.length > 1 ? 's' : ''}</small></button>`).join('')}
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+  modal.onclick = async (e) => {
+    if (e.target === modal || e.target.closest('[data-x]')) return modal.remove();
+    const b = e.target.closest('[data-st]');
+    if (!b) return;
+    modal.remove();
+    let p = newVideoProject(preset.w, preset.h, preset.name);
+    if (b.dataset.st) p = applyStarter(p, b.dataset.st);
+    await saveDesign(p);
+    openVideo(p);
+  };
+}
+/** Render one page of a design to a PNG blob (used to turn designs into video slides). */
+async function designPageToBlob(d, i) {
+  await fontsReady;
+  const el = document.createElement('canvas');
+  const sc = new StaticCanvas(el, { width: d.width, height: d.height, enableRetinaScaling: false, renderOnAddRemove: false });
+  if (d.pages[i]?.json) await sc.loadFromJSON(d.pages[i].json);
+  if (!sc.backgroundColor) sc.backgroundColor = '#ffffff';
+  sc.renderAll();
+  const blob = await new Promise((r) => sc.lowerCanvasEl.toBlob(r, 'image/png'));
+  sc.dispose();
+  return blob;
 }
 
 async function importDesignFile(file) {
@@ -269,6 +350,7 @@ async function importDesignFile(file) {
 // EDITOR
 // =====================================================
 async function openEditor(design) {
+  closeVideoEditor();
   state.design = design;
   state.page = 0;
   state.lastVersionAt = 0;
@@ -306,6 +388,7 @@ async function openEditor(design) {
 
   await fontsReady;
   await loadPage(0);
+  if (state.tab === 'ai') $$('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === 'ai'));
   fitZoom();
   renderTab();
   renderProps();
@@ -3368,10 +3451,10 @@ function setPropsOpen(open) {
 async function boot() {
   await loadBrand();
   await loadMyTemplates();
-  const m = (location.hash.match(/^#\/design\/(\w+)/) || location.pathname.match(/^\/design\/(\w+)/));
+  const m = location.hash.match(/^#\/(?:design|video)\/(\w+)/) || location.pathname.match(/^\/design\/(\w+)/);
   if (m) {
     const d = await getDesign(m[1]).catch(() => null);
-    if (d) return openEditor(d);
+    if (d) return d.kind === 'video' ? openVideo(d) : openEditor(d);
   }
   renderHome();
 }
@@ -3380,4 +3463,4 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && sta
 boot();
 
 // expose a tiny API for debugging/testing
-window.artvas = { loadPack, state, addText, addShape, addImage, exportDesign, util, templateThumb, TEMPLATES, FORMATS };
+window.artvas = { video: _videoDebug, openVideo, pickVideoStarter, loadPack, state, addText, addShape, addImage, exportDesign, util, templateThumb, TEMPLATES, FORMATS };
