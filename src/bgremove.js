@@ -1,46 +1,37 @@
 // Background removal.
-// 1) AI remover: BiRefNet_lite (MIT license) running fully in the browser via transformers.js.
-//    The library is loaded from a CDN only when first used; the model (~115 MB) is downloaded once
-//    and then cached by the browser.
+// 1) AI remover, fully in the browser via transformers.js (loaded from a CDN on first use):
+//    - with a GPU (WebGPU): BiRefNet_lite (MIT) — best edges, ~115 MB, cached after first use
+//    - without a GPU, or if that fails: ormbg (Apache-2.0), a light CPU-friendly model, ~44 MB
 // 2) Color remover: removes pixels close to a chosen color (works offline, great for logos/flat backgrounds).
 
 const TRANSFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6';
 const MODEL_ID = 'onnx-community/BiRefNet_lite-ONNX';
+const LIGHT_ID = 'onnx-community/ormbg-ONNX';
+let lightPipe;
 
-let modelPromise;
+let tfPromise;
+let working = null; // { model, processor, opt } that has run successfully
+const failed = new Set();
 
-async function loadModel(onProgress) {
-  if (!modelPromise) {
-    modelPromise = (async () => {
-      const tf = await import(/* @vite-ignore */ TRANSFORMERS_URL);
-      tf.env.allowLocalModels = false;
-      const progress_callback = (p) => {
-        if (p.status === 'progress' && p.file?.endsWith('.onnx')) onProgress?.(`Downloading AI model… ${Math.round(p.progress)}%`);
-      };
-      const hasGPU = !!navigator.gpu && !!(await navigator.gpu.requestAdapter().catch(() => null));
-      let model;
-      const tries = hasGPU
-        ? [{ device: 'webgpu', dtype: 'fp16' }, { device: 'wasm', dtype: 'fp16' }, { device: 'wasm', dtype: 'fp32' }]
-        : [{ device: 'wasm', dtype: 'fp16' }, { device: 'wasm', dtype: 'fp32' }];
-      let lastErr;
-      for (const opt of tries) {
-        try {
-          model = await tf.AutoModel.from_pretrained(MODEL_ID, { ...opt, progress_callback });
-          break;
-        } catch (e) {
-          lastErr = e;
-          console.warn('Model load failed with', opt, e);
-        }
-      }
-      if (!model) throw lastErr;
-      const processor = await tf.AutoProcessor.from_pretrained(MODEL_ID);
-      return { tf, model, processor };
-    })().catch((e) => {
-      modelPromise = null;
-      throw e;
-    });
+function loadTF() {
+  if (!tfPromise) {
+    tfPromise = import(/* @vite-ignore */ TRANSFORMERS_URL)
+      .then((tf) => {
+        tf.env.allowLocalModels = false;
+        return tf;
+      })
+      .catch((e) => {
+        tfPromise = null;
+        throw e;
+      });
   }
-  return modelPromise;
+  return tfPromise;
+}
+
+async function candidates() {
+  const hasGPU = !!navigator.gpu && !!(await navigator.gpu.requestAdapter().catch(() => null));
+  const list = hasGPU ? [{ device: 'webgpu', dtype: 'fp16' }, { device: 'webgpu', dtype: 'fp32' }] : [];
+  return list.filter((o) => !failed.has(o.device + o.dtype));
 }
 
 function loadImg(src) {
@@ -53,11 +44,17 @@ function loadImg(src) {
   });
 }
 
+async function runModel(tf, model, processor, image) {
+  const { pixel_values } = await processor(image);
+  const out = await model({ input_image: pixel_values });
+  const tensor = out.output_image ?? Object.values(out)[0];
+  return tf.RawImage.fromTensor(tensor[0].sigmoid().mul(255).to('uint8'));
+}
+
 /** Returns a PNG data URL of the image with its background removed. */
 export async function removeBackgroundAI(src, onProgress) {
   onProgress?.('Loading AI model…');
-  const { tf, model, processor } = await loadModel(onProgress);
-  onProgress?.('Removing background…');
+  const tf = await loadTF();
   const img = await loadImg(src);
   const cv = document.createElement('canvas');
   cv.width = img.naturalWidth;
@@ -65,13 +62,59 @@ export async function removeBackgroundAI(src, onProgress) {
   const ctx = cv.getContext('2d');
   ctx.drawImage(img, 0, 0);
   const image = await tf.RawImage.fromURL(cv.toDataURL('image/png'));
-  const { pixel_values } = await processor(image);
-  const out = await model({ input_image: pixel_values });
-  const tensor = out.output_image ?? Object.values(out)[0];
-  const mask = await tf.RawImage.fromTensor(tensor[0].sigmoid().mul(255).to('uint8')).resize(cv.width, cv.height);
+  const progress_callback = (p) => {
+    if (p.status === 'progress' && p.file?.endsWith('.onnx')) onProgress?.(`Downloading AI model… ${Math.round(p.progress)}%`);
+  };
+  let mask;
+  let lastErr;
+  // Try the fastest setup first; if this browser can't run it, fall back to the next one.
+  const tries = working ? [working] : await candidates();
+  for (const t of tries) {
+    try {
+      const model = t.model || (await tf.AutoModel.from_pretrained(MODEL_ID, { ...t, progress_callback }));
+      const processor = t.processor || (await tf.AutoProcessor.from_pretrained(MODEL_ID));
+      onProgress?.('Removing background…');
+      mask = await runModel(tf, model, processor, image);
+      working = { ...t, model, processor };
+      break;
+    } catch (e) {
+      lastErr = e;
+      console.warn('Background removal failed with', t.device, t.dtype, e);
+      failed.add(t.device + t.dtype);
+      if (working === t) working = null;
+    }
+  }
+  if (!mask) {
+    // Light CPU model
+    try {
+      if (!lightPipe) {
+        lightPipe = tf.pipeline('background-removal', LIGHT_ID, { device: 'wasm', dtype: 'uint8', progress_callback }).catch((e) => {
+          lightPipe = null;
+          throw e;
+        });
+      }
+      const pipe = await lightPipe;
+      onProgress?.('Removing background…');
+      const out = await pipe(image);
+      const rgba = Array.isArray(out) ? out[0] : out;
+      // the pipeline returns the cut-out image; take its alpha channel as the mask
+      mask = rgba;
+    } catch (e) {
+      console.warn('Light background removal failed', e);
+      throw new Error(typeof e === 'number' || !e?.message ? (typeof lastErr === 'number' || !lastErr?.message ? 'this device ran out of memory — try a smaller image' : lastErr.message) : e.message);
+    }
+    const sized = await mask.resize(cv.width, cv.height);
+    const data = ctx.getImageData(0, 0, cv.width, cv.height);
+    const m = sized.data;
+    const ch = sized.channels || 4;
+    for (let i = 0; i < data.data.length / 4; i++) data.data[i * 4 + 3] = m[i * ch + (ch - 1)];
+    ctx.putImageData(data, 0, 0);
+    return cv.toDataURL('image/png');
+  }
+  const sized = await mask.resize(cv.width, cv.height);
   const data = ctx.getImageData(0, 0, cv.width, cv.height);
-  const m = mask.data;
-  const ch = mask.channels || 1;
+  const m = sized.data;
+  const ch = sized.channels || 1;
   for (let i = 0; i < data.data.length / 4; i++) data.data[i * 4 + 3] = m[i * ch];
   ctx.putImageData(data, 0, 0);
   return cv.toDataURL('image/png');

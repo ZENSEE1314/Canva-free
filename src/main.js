@@ -16,7 +16,8 @@ import {
   GRIDS, buildGrid, gridPreview, FRAMES, buildFrame, GRADIENT_ELEMENTS, buildGradientElement, gradientPreview,
 } from './library.js';
 import { AI_MODELS, AI_STYLES, closestRatio, getKey, setKey, generateImage, toDataURL, fetchMediaBlob } from './ai.js';
-import { openVideoEditor, closeVideoEditor, newVideoProject, VIDEO_PRESETS, VIDEO_STARTERS, applyStarter, _videoDebug } from './video.js';
+import { openVideoEditor, closeVideoEditor, newVideoProject, VIDEO_PRESETS, SCREEN_SIZES, VIDEO_STARTERS, applyStarter, _videoDebug } from './video.js';
+import { VIDEO_TEMPLATES, TEMPLATE_CATS as VT_CATS, buildFromTemplate, templateDuration } from './videotemplates.js';
 import { icon } from './icons.js';
 
 const PROPS = [
@@ -121,6 +122,14 @@ async function renderHome() {
           <div class="vp-frame"><div style="aspect-ratio:${p.w}/${p.h}"><span>${icon('play', 18)}</span></div></div>
           <b>${esc(p.name)}</b><small>${p.w} × ${p.h} · ${esc(p.hint)}</small></button>`).join('')}
       </div>
+      <h3 class="fmt-title">More screen sizes</h3>
+      <div class="size-chips">${SCREEN_SIZES.map((z, i) => `<button class="size-chip" data-ss="${i}"><i style="aspect-ratio:${z.w}/${z.h}"></i><span><b>${esc(z.name)}</b><small>${z.w}×${z.h}</small></span></button>`).join('')}</div>
+      <div class="custom-video"><span>Custom video size</span><input type="number" id="vcw" value="1080" min="64" max="4096"> × <input type="number" id="vch" value="2340" min="64" max="4096"><button class="btn ghost small" id="vcGo">Create</button></div>
+    </section>
+    <section class="home-section">
+      <h2>Video templates <small>(${VIDEO_TEMPLATES.length})</small></h2>
+      <div class="chips" id="vtChips">${VT_CATS.map((c) => `<button class="chip ${c === 'All' ? 'on' : ''}" data-hvtc="${c}">${c}</button>`).join('')}</div>
+      <div class="vt-row" id="vtRow">${VIDEO_TEMPLATES.map((t) => homeTemplateCard(t)).join('')}</div>
     </section>
     <section class="home-section" id="designSection">
       <h2>Start a new design</h2>
@@ -189,6 +198,19 @@ async function renderHome() {
   $('#newCustomTop').onclick = () => newDesign(1080, 1080, 'Instagram Post');
   $('#openFile').onchange = (e) => importDesignFile(e.target.files[0]);
   $$('[data-vp]').forEach((b) => (b.onclick = () => pickVideoStarter(VIDEO_PRESETS[+b.dataset.vp])));
+  $$('[data-ss]').forEach((b) => (b.onclick = () => pickVideoStarter(SCREEN_SIZES[+b.dataset.ss])));
+  $('#vcGo').onclick = () => {
+    const w = Math.max(64, Math.min(4096, Math.round(+$('#vcw').value || 1080)));
+    const h = Math.max(64, Math.min(4096, Math.round(+$('#vch').value || 1920)));
+    pickVideoStarter({ name: 'Custom video', w, h });
+  };
+  $$('[data-hvtc]').forEach((b) =>
+    (b.onclick = () => {
+      $$('[data-hvtc]').forEach((x) => x.classList.toggle('on', x === b));
+      $$('#vtRow [data-hvt]').forEach((c) => (c.style.display = b.dataset.hvtc === 'All' || c.dataset.cat === b.dataset.hvtc ? '' : 'none'));
+    })
+  );
+  $$('[data-hvt]').forEach((b) => (b.onclick = () => pickTemplateFormat(b.dataset.hvt)));
   $$('[data-mode]').forEach((b) =>
     (b.onclick = async () => {
       const m = b.dataset.mode;
@@ -289,12 +311,46 @@ function videoHelpers() {
     designPageToBlob,
   };
 }
-async function openVideo(project) {
+async function openVideo(project, opts = {}) {
   state.canvas?.dispose();
   state.canvas = null;
   state.design = null;
   try { history.replaceState(null, '', `#/video/${project.id}`); } catch {}
-  await openVideoEditor(project, videoHelpers());
+  await openVideoEditor(project, videoHelpers(), opts);
+}
+function homeTemplateCard(t) {
+  const sample = (t.layers.find((l) => l.text) || {}).text || t.name;
+  return `<button class="vt-card" data-hvt="${t.id}" data-cat="${esc(t.cat)}" style="--tc:${t.color}">
+    <div class="vt-thumb"><span class="vt-sample">${esc(sample.split('\n')[0])}</span><span class="vt-meta">${t.slots.length} clips · ${templateDuration(t).toFixed(0)}s</span></div>
+    <b>${esc(t.name)}</b><small>${esc(t.cat)}</small></button>`;
+}
+async function startVideoFromTemplate(tplId, size) {
+  const tpl = VIDEO_TEMPLATES.find((t) => t.id === tplId);
+  const p = newVideoProject(size.w, size.h, tpl.name);
+  const { clips, overlays } = buildFromTemplate(tpl, []);
+  p.clips = clips;
+  p.overlays = overlays;
+  await saveDesign(p);
+  openVideo(p, { tab: 'templates' });
+}
+function pickTemplateFormat(tplId) {
+  const tpl = VIDEO_TEMPLATES.find((t) => t.id === tplId);
+  const sizes = [VIDEO_PRESETS[0], VIDEO_PRESETS[2], SCREEN_SIZES[0], VIDEO_PRESETS[4], VIDEO_PRESETS[7], VIDEO_PRESETS[6]];
+  const modal = document.createElement('div');
+  modal.className = 'modal-back';
+  modal.innerHTML = `<div class="modal">
+    <div class="row"><h3>${esc(tpl.name)}</h3><span class="spacer"></span><button class="icon-btn" data-x>${icon('x')}</button></div>
+    <p class="muted">${tpl.slots.length} clips · ${templateDuration(tpl).toFixed(0)} seconds. Pick a format, then add your photos & videos.</p>
+    <div class="starter-grid">${sizes.map((z, i) => `<button class="starter" data-zi="${i}"><b>${esc(z.name)}</b><small>${z.w} × ${z.h}</small></button>`).join('')}</div>
+  </div>`;
+  document.body.appendChild(modal);
+  modal.onclick = (e) => {
+    if (e.target === modal || e.target.closest('[data-x]')) return modal.remove();
+    const b = e.target.closest('[data-zi]');
+    if (!b) return;
+    modal.remove();
+    startVideoFromTemplate(tplId, sizes[+b.dataset.zi]);
+  };
 }
 function pickVideoStarter(preset) {
   const modal = document.createElement('div');
@@ -306,10 +362,17 @@ function pickVideoStarter(preset) {
       <button class="starter" data-st=""><b>Blank video</b><small>Just your clips</small></button>
       ${VIDEO_STARTERS.map((st) => `<button class="starter" data-st="${st.id}"><b>${esc(st.name)}</b><small>${st.overlays.length} text layer${st.overlays.length > 1 ? 's' : ''}</small></button>`).join('')}
     </div>
+    <h4>Or start from a video template</h4>
+    <div class="vt-row small">${VIDEO_TEMPLATES.slice(0, 12).map((t) => homeTemplateCard(t).replace('data-hvt=', 'data-mvt=')).join('')}</div>
   </div>`;
   document.body.appendChild(modal);
   modal.onclick = async (e) => {
     if (e.target === modal || e.target.closest('[data-x]')) return modal.remove();
+    const tb = e.target.closest('[data-mvt]');
+    if (tb) {
+      modal.remove();
+      return startVideoFromTemplate(tb.dataset.mvt, preset);
+    }
     const b = e.target.closest('[data-st]');
     if (!b) return;
     modal.remove();
@@ -2860,7 +2923,7 @@ function bgRemoverHTML() {
   return `
     <h4>Background remover</h4>
     <button class="btn primary block" id="bgAI">${icon('wand')} Remove background (AI)</button>
-    <p class="muted" id="bgAIstatus">Runs privately in your browser. First use downloads the AI model (~115 MB, then cached).</p>
+    <p class="muted" id="bgAIstatus">Runs privately in your browser. First use downloads an AI model (44–115 MB, then cached).</p>
     <div class="field"><label>Remove a color <b id="tolV">25</b></label>
       <div class="row"><input type="color" id="rcColor" value="#ffffff"><input type="range" id="rcTol" min="1" max="80" value="25" style="flex:1"></div>
       <div class="row mt"><button class="btn ghost small" id="rcAuto">Auto (corner color)</button><button class="btn ghost small" id="rcGo">Remove color</button></div>

@@ -12,7 +12,14 @@ Artvas is a free all-in-one creative studio that runs in the browser. It has a d
 - **Audio**: add music and voice-overs with volume and fade in/out. Clip sound is mixed in automatically.
 - **Designs as slides**: turn any Artvas design into a video slide, one clip per page.
 - **AI**: generate image clips, or video clips with Seedance, Wan, Kling, PixVerse or Veo 3, using your own Muapi key.
-- **Export**: MP4 (or WebM) at 480p, 720p or 1080p, with mixed audio. Projects and media are saved in your browser (IndexedDB).
+- **Video templates**: 35 Artvas templates (photo dump, beat sync, glitch intro, POV, GRWM, story time, year recap, day in my life, travel diary, recipe, OOTD, before/after, glow up, gym progress, top 3 countdown, product launch, flash sale, home tour, lyrics, RED note and more). Pick your photos and videos and they fill the slots, with cuts, effects, transitions and animated text already set up.
+- **More sizes**: phone full-screen (19.5:9, iPhone 15/16, iPhone Pro Max, Android 20:9, QHD+), vertical HD and 4K, 4:5, 3:4, 2:3, 4K UHD, cinematic 21:9 and 4:3, plus any custom size up to 4096 px.
+- **Effects**: zoom in or out (Ken Burns), pan, beat pulse, shake, glitch, flash, blur in, VHS, vignette and mirror. There are also 13 transitions, including zoom blur, circle, spin and glitch.
+- **Crop and position**: zoom, move, rotate 90° and flip any clip. You can also replace a clip and add a freeze frame.
+- **Picture-in-picture**: put videos or photos on top of the main video, with green-screen (chroma key) removal, volume, circle crop and rotation.
+- **Keyframes**: animate the position, size and opacity of text, stickers and overlays between keyframes.
+- **Captions**: automatic captions from speech (Whisper, running in the browser, auto-detects the language, 2–6 words per caption or full lines), captions from a typed script, and 5 caption styles.
+- **Export**: MP4 (or WebM) at 480p up to full size, with mixed audio. Projects and media are saved in your browser (IndexedDB).
 
 ## Features
 
@@ -35,7 +42,7 @@ Artvas is a free all-in-one creative studio that runs in the browser. It has a d
 - **Download**: PNG (with an optional transparent background), JPG, SVG, a multi-page PDF, or a `.json` project file. You can export at 0.5× to 3× size.
 - **My templates**: save any design (one page or all pages) as your own template with a name and category. Templates fit any design size when used. You can use them from the editor or start a new design from the home page, and rename, delete, export and import them (a `.json` file, so you can move them to another browser or computer).
 - **AI Image**: generate images with 10+ models (Flux, Nano Banana, Seedream, Imagen 4, Ideogram, Midjourney, GPT Image…) through [Muapi.ai](https://muapi.ai), using your own API key. The approach is based on the MIT-licensed [Open Higgsfield AI](https://github.com/sunnychase/open-higgsfield-ai). You can pick a style and an image shape. Results go onto the page or into the selected photo spot, and **Generate photos for this page** fills every photo spot in a template using prompts written for that template. Your key is stored only in your browser. On the Artvas server, requests go through a small relay (`/api/muapi/*`) that passes your key through and never stores it.
-- **Background remover**: AI background removal ([BiRefNet_lite](https://huggingface.co/onnx-community/BiRefNet_lite-ONNX), MIT license) that runs privately in the browser. The model is downloaded once (about 115 MB) and then cached. There is also a "remove a color" tool for logos and flat backgrounds, and you can restore the original image.
+- **Background remover**: AI background removal that runs privately in the browser. With a GPU it uses [BiRefNet_lite](https://huggingface.co/onnx-community/BiRefNet_lite-ONNX) (MIT, about 115 MB); otherwise it uses [ormbg](https://huggingface.co/onnx-community/ormbg-ONNX) (Apache-2.0, about 44 MB). The model is downloaded once and then cached. There is also a "remove a color" tool for logos and flat backgrounds, and you can restore the original image.
 - **Animations**: 13 element animations (fade, rise, drop, slide, zoom, pop, spin, bounce, typewriter, blink, pulse, wiggle), whole-page presets with staggered timing, per-element duration and delay, page duration, and a live preview.
 - **Animated downloads**: an animated GIF, or an MP4 video (WebM in browsers that can't record MP4). Every page plays in order.
 - **Brand Kit**: brand colors (shown in every color picker and applied to a page in one click), heading and body fonts, custom font upload (.ttf/.otf/.woff), and logos.

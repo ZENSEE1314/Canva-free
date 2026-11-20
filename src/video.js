@@ -7,6 +7,8 @@ import { videoMime } from './animate.js';
 import { loadPack, flatSrc, PACK_CATS } from './library.js';
 import { FONTS } from './data.js';
 import { getKey, AI_MODELS, AI_STYLES, VIDEO_MODELS, closestRatio, generateImage, generateVideo, toDataURL } from './ai.js';
+import { VIDEO_TEMPLATES, TEMPLATE_CATS as VT_CATS, buildFromTemplate, templateDuration } from './videotemplates.js';
+import { transcribeMedia, scriptToLines } from './captions.js';
 
 export const VIDEO_PRESETS = [
   { id: 'tiktok', name: 'TikTok', w: 1080, h: 1920, color: '#111111', hint: '9:16 · up to 10 min' },
@@ -18,6 +20,29 @@ export const VIDEO_PRESETS = [
   { id: 'youtube', name: 'YouTube video', w: 1920, h: 1080, color: '#ff0000', hint: '16:9 · HD' },
   { id: 'square', name: 'Square video', w: 1080, h: 1080, color: '#7c3aed', hint: '1:1' },
 ];
+
+// Every other screen size people ask for: real phone screens, 4K, cinematic, classic ratios.
+export const SCREEN_SIZES = [
+  { group: 'Phone full screen', name: 'Phone 19.5:9 (most iPhones & Androids)', w: 1080, h: 2340 },
+  { group: 'Phone full screen', name: 'iPhone 15 / 16', w: 1179, h: 2556 },
+  { group: 'Phone full screen', name: 'iPhone Pro Max', w: 1290, h: 2796 },
+  { group: 'Phone full screen', name: 'Android 20:9', w: 1080, h: 2400 },
+  { group: 'Phone full screen', name: 'Android QHD+', w: 1440, h: 3200 },
+  { group: 'Portrait', name: 'Vertical 9:16 HD', w: 720, h: 1280 },
+  { group: 'Portrait', name: 'Vertical 9:16 Full HD', w: 1080, h: 1920 },
+  { group: 'Portrait', name: 'Vertical 4K', w: 2160, h: 3840 },
+  { group: 'Portrait', name: 'Portrait 4:5', w: 1080, h: 1350 },
+  { group: 'Portrait', name: 'Portrait 3:4', w: 1080, h: 1440 },
+  { group: 'Portrait', name: 'Portrait 2:3', w: 1080, h: 1620 },
+  { group: 'Square', name: 'Square 1:1', w: 1080, h: 1080 },
+  { group: 'Landscape', name: 'HD 720p', w: 1280, h: 720 },
+  { group: 'Landscape', name: 'Full HD 1080p', w: 1920, h: 1080 },
+  { group: 'Landscape', name: '4K UHD', w: 3840, h: 2160 },
+  { group: 'Landscape', name: 'Cinematic 21:9', w: 2560, h: 1080 },
+  { group: 'Landscape', name: 'Classic 4:3', w: 1440, h: 1080 },
+  { group: 'Landscape', name: 'Phone landscape 19.5:9', w: 2340, h: 1080 },
+];
+export const ALL_VIDEO_SIZES = [...VIDEO_PRESETS.map((p) => ({ group: 'Platforms', name: p.name, w: p.w, h: p.h })), ...SCREEN_SIZES];
 
 // Starter layouts: text/sticker overlays ready for the user's clips.
 export const VIDEO_STARTERS = [
@@ -71,7 +96,12 @@ const FILTERS = [
   { id: 'drama', label: 'Dramatic', f: { contrast: 1.35, brightness: 0.92, saturate: 1.1 } },
 ];
 const TRANSITIONS = [
-  ['none', 'None'], ['fade', 'Crossfade'], ['black', 'Dip to black'], ['white', 'Flash'], ['slide', 'Slide'], ['up', 'Push up'], ['zoom', 'Zoom'], ['wipe', 'Wipe'], ['blur', 'Blur'],
+  ['none', 'None'], ['fade', 'Crossfade'], ['black', 'Dip to black'], ['white', 'Flash'], ['slide', 'Slide'], ['up', 'Push up'], ['zoom', 'Zoom'], ['zoomblur', 'Zoom blur'],
+  ['wipe', 'Wipe'], ['iris', 'Circle'], ['spin', 'Spin'], ['glitch', 'Glitch'], ['blur', 'Blur'],
+];
+const EFFECTS = [
+  ['none', 'None'], ['kb-in', 'Zoom in'], ['kb-out', 'Zoom out'], ['pan', 'Pan'], ['zoompulse', 'Beat pulse'], ['shake', 'Shake'], ['glitch', 'Glitch'],
+  ['flash', 'Flash in'], ['blurin', 'Blur in'], ['vhs', 'VHS'], ['vignette', 'Vignette'], ['mirror', 'Mirror'],
 ];
 const ANIM_IN = [['none', 'None'], ['fade', 'Fade'], ['pop', 'Pop'], ['up', 'Slide up'], ['left', 'Slide in'], ['type', 'Typewriter'], ['zoom', 'Zoom']];
 const ANIM_OUT = [['none', 'None'], ['fade', 'Fade'], ['pop', 'Pop'], ['down', 'Slide down'], ['zoom', 'Zoom out']];
@@ -108,7 +138,7 @@ const easeBack = (x) => {
 };
 
 function clipDur(c) {
-  return c.type === 'image' ? c.dur : Math.max(0.1, (c.out - c.in) / (c.speed || 1));
+  return c.type === 'image' || c.type === 'color' ? c.dur : Math.max(0.1, (c.out - c.in) / (c.speed || 1));
 }
 function clipStarts() {
   let t = 0;
@@ -241,7 +271,7 @@ function ensureAudioGraph() {
   if (!AC) return;
   V.ac = new AC();
   V.dest = V.ac.createMediaStreamDestination();
-  for (const el of [...V.els.values(), ...V.aels.values()]) wireAudio(el);
+  for (const el of [...V.els.values(), ...V.aels.values(), ...V.oels.values()]) wireAudio(el);
 }
 function wireAudio(el) {
   if (!V.ac || el._gain || !(el instanceof HTMLMediaElement)) return;
@@ -262,6 +292,7 @@ function setGain(el, v) {
 }
 
 async function elFor(clip) {
+  if (clip.type === 'color') return null;
   let el = V.els.get(clip.id);
   if (el && el._media === clip.mediaId) return el;
   const url = await mediaURL(clip.mediaId);
@@ -292,8 +323,24 @@ async function audioElFor(a) {
   V.aels.set(a.id, el);
   return el;
 }
+async function overlayElFor(o) {
+  if (o.type !== 'video') return null;
+  let el = V.oels.get(o.id);
+  if (el && el._media === o.mediaId) return el;
+  const url = await mediaURL(o.mediaId);
+  if (!url) return null;
+  el = document.createElement('video');
+  el.preload = 'auto';
+  el.playsInline = true;
+  el.src = url;
+  el._media = o.mediaId;
+  wireAudio(el);
+  V.oels.set(o.id, el);
+  return el;
+}
 async function prepareAll() {
-  await Promise.all([...V.p.clips.map(elFor), ...V.p.audio.map(audioElFor)]);
+  await Promise.all([...V.p.clips.map(elFor), ...V.p.audio.map(audioElFor), ...V.p.overlays.map(overlayElFor)]);
+  for (const id of [...V.oels.keys()]) if (!V.p.overlays.some((o) => o.id === id)) dropEl(V.oels, id);
   for (const id of [...V.els.keys()]) if (!V.p.clips.some((c) => c.id === id)) dropEl(V.els, id);
   for (const id of [...V.aels.keys()]) if (!V.p.audio.some((a) => a.id === id)) dropEl(V.aels, id);
 }
@@ -332,6 +379,25 @@ function sync(t, playing) {
       if (act && i === act.idx + 1 && Math.abs(el.currentTime - c.in) > 0.1 && !el.seeking) el.currentTime = c.in;
     }
   });
+  V.p.overlays.forEach((o) => {
+    if (o.type !== 'video') return;
+    const el = V.oels.get(o.id);
+    if (!el) return;
+    const local = t - o.start;
+    if (local >= 0 && local < o.dur) {
+      const target = clamp((o.in || 0) + local, 0, (el.duration || 1e9) - 0.02);
+      setGain(el, o.muted ? 0 : o.volume ?? 1);
+      if (playing) {
+        if (el.paused) {
+          el.currentTime = target;
+          el.play().catch(() => {});
+        } else if (Math.abs(el.currentTime - target) > 0.35) el.currentTime = target;
+      } else {
+        if (!el.paused) el.pause();
+        if (Math.abs(el.currentTime - target) > 0.04 && !el.seeking) el.currentTime = target;
+      }
+    } else if (!el.paused) el.pause();
+  });
   V.p.audio.forEach((a) => {
     const el = V.aels.get(a.id);
     if (!el) return;
@@ -356,36 +422,159 @@ function sync(t, playing) {
 // ---------- rendering ----------
 const imgCache = new Map();
 function overlayImg(o) {
-  let img = imgCache.get(o.src);
+  const src = o.mediaId ? V.urls.get(o.mediaId) : o.src;
+  if (!src) return new Image();
+  let img = imgCache.get(src);
   if (!img) {
     img = new Image();
-    img.src = o.src;
-    imgCache.set(o.src, img);
+    img.src = src;
+    imgCache.set(src, img);
   }
   return img;
 }
 
-function drawMedia(g, el, c, W, Hh, { alpha = 1, dx = 0, dy = 0, scale = 1, blur = 0 } = {}) {
-  const sw = el.videoWidth || el.naturalWidth || el.width;
-  const sh = el.videoHeight || el.naturalHeight || el.height;
+function drawMedia(g, el, c, W, Hh, { alpha = 1, dx = 0, dy = 0, scale = 1, blur = 0, rot = 0, local = 0 } = {}) {
+  if (c.type === 'color') {
+    g.save();
+    g.globalAlpha = alpha;
+    g.fillStyle = c.color || '#222';
+    g.translate(W / 2 + dx, Hh / 2 + dy);
+    g.rotate(rot);
+    g.scale(scale, scale);
+    g.fillRect(-W / 2, -Hh / 2, W, Hh);
+    if (c.slot) {
+      g.fillStyle = 'rgba(255,255,255,0.85)';
+      g.font = `700 ${Math.round(Math.min(W, Hh) * 0.045)}px "DM Sans", sans-serif`;
+      g.textAlign = 'center';
+      g.fillText(`Clip ${c.slot} — tap Replace`, 0, Math.min(W, Hh) * 0.02);
+    }
+    g.restore();
+    return;
+  }
+  if (!el) return;
+  const tf = c.tf || {};
+  const quarter = ((tf.rot || 0) / 90) % 2 !== 0;
+  let sw = el.videoWidth || el.naturalWidth || el.width;
+  let sh = el.videoHeight || el.naturalHeight || el.height;
   if (!sw || !sh) return;
   if (el instanceof HTMLVideoElement && el.readyState < 2) return;
-  const cover = Math.max(W / sw, Hh / sh);
-  const contain = Math.min(W / sw, Hh / sh);
+  const [ew, eh] = quarter ? [sh, sw] : [sw, sh];
+  const cover = Math.max(W / ew, Hh / eh);
+  const contain = Math.min(W / ew, Hh / eh);
   const filt = filterString(c);
+  // clip effects
+  const fx = clipEffect(c, local, W, Hh);
   g.save();
   g.globalAlpha = alpha;
-  g.translate(W / 2 + dx, Hh / 2 + dy);
-  g.scale(scale, scale);
+  g.translate(W / 2 + dx + fx.dx, Hh / 2 + dy + fx.dy);
+  g.rotate(rot + fx.rot);
+  g.scale(scale * fx.scale, scale * fx.scale);
   if (c.fit === 'fit' && Math.abs(cover - contain) > 0.001) {
     // blurred backdrop behind letterboxed media
+    g.save();
+    g.rotate(((tf.rot || 0) * Math.PI) / 180);
     g.filter = `blur(${Math.round(Math.min(W, Hh) * 0.04)}px) brightness(0.7)`;
     g.drawImage(el, (-sw * cover) / 2 - 20, (-sh * cover) / 2 - 20, sw * cover + 40, sh * cover + 40);
+    g.restore();
   }
-  const s = c.fit === 'fit' ? contain : cover;
-  g.filter = blur ? `${filt === 'none' ? '' : filt} blur(${blur}px)` : filt;
-  g.drawImage(el, (-sw * s) / 2, (-sh * s) / 2, sw * s, sh * s);
+  const s0 = (c.fit === 'fit' ? contain : cover) * (tf.zoom || 1);
+  g.translate((tf.x || 0) * W * 0.5, (tf.y || 0) * Hh * 0.5);
+  g.rotate(((tf.rot || 0) * Math.PI) / 180);
+  g.scale(tf.fx ? -1 : 1, tf.fy ? -1 : 1);
+  const bl = blur + fx.blur;
+  g.filter = bl ? `${filt === 'none' ? '' : filt} blur(${bl}px)` : filt;
+  if (fx.mirror) {
+    g.save();
+    g.beginPath();
+    g.rect((-sw * s0) / 2, (-sh * s0) / 2, (sw * s0) / 2, sh * s0);
+    g.clip();
+    g.drawImage(el, (-sw * s0) / 2, (-sh * s0) / 2, sw * s0, sh * s0);
+    g.restore();
+    g.save();
+    g.scale(-1, 1);
+    g.beginPath();
+    g.rect((-sw * s0) / 2, (-sh * s0) / 2, (sw * s0) / 2, sh * s0);
+    g.clip();
+    g.drawImage(el, (-sw * s0) / 2, (-sh * s0) / 2, sw * s0, sh * s0);
+    g.restore();
+  } else g.drawImage(el, (-sw * s0) / 2, (-sh * s0) / 2, sw * s0, sh * s0);
+  if (fx.glitch) {
+    // horizontal slice displacement + colour split
+    g.filter = 'none';
+    const n = 5;
+    for (let i = 0; i < n; i++) {
+      const y = (-sh * s0) / 2 + ((Math.sin(local * 37 + i * 13) + 1) / 2) * sh * s0 * 0.9;
+      const hgt = sh * s0 * (0.02 + 0.05 * Math.abs(Math.sin(i * 7 + local * 11)));
+      const off = Math.sin(local * 53 + i) * W * 0.06 * fx.glitch;
+      g.drawImage(el, 0, ((y + (sh * s0) / 2) / (sh * s0)) * sh, sw, (hgt / (sh * s0)) * sh, (-sw * s0) / 2 + off, y, sw * s0, hgt);
+    }
+    g.globalCompositeOperation = 'screen';
+    g.globalAlpha = 0.35 * fx.glitch * alpha;
+    g.filter = 'hue-rotate(90deg) saturate(3)';
+    g.drawImage(el, (-sw * s0) / 2 + W * 0.012, (-sh * s0) / 2, sw * s0, sh * s0);
+  }
   g.restore();
+  if (fx.overlay) fx.overlay(g, W, Hh, alpha);
+}
+
+/** Per-clip effect at local time t (seconds into the clip). */
+function clipEffect(c, t, W, Hh) {
+  const fx = { dx: 0, dy: 0, scale: 1, rot: 0, blur: 0, glitch: 0, mirror: false, overlay: null };
+  const d = clipDur(c);
+  const p = clamp(t / Math.max(0.1, d), 0, 1);
+  switch (c.effect) {
+    case 'kb-in': fx.scale = 1 + 0.15 * p; break;
+    case 'kb-out': fx.scale = 1.15 - 0.15 * p; break;
+    case 'pan': fx.scale = 1.15; fx.dx = W * 0.06 * (1 - 2 * p); break;
+    case 'zoompulse': fx.scale = 1 + 0.06 * Math.pow(Math.abs(Math.sin(t * Math.PI * 2)), 4); break;
+    case 'shake': fx.scale = 1.06; fx.dx = Math.sin(t * 61) * W * 0.012; fx.dy = Math.cos(t * 47) * Hh * 0.01; fx.rot = Math.sin(t * 29) * 0.012; break;
+    case 'glitch': fx.glitch = t < 0.35 || (t % 1.3) < 0.12 ? 1 : 0; break;
+    case 'blurin': fx.blur = Math.max(0, 1 - t / 0.6) * Math.min(W, Hh) * 0.04; break;
+    case 'mirror': fx.mirror = true; break;
+    case 'flash':
+      fx.overlay = (g, w, h, a) => {
+        const k = Math.max(0, 1 - t / 0.25);
+        if (!k) return;
+        g.save();
+        g.globalAlpha = k * a;
+        g.fillStyle = '#fff';
+        g.fillRect(0, 0, w, h);
+        g.restore();
+      };
+      break;
+    case 'vignette':
+      fx.overlay = (g, w, h, a) => {
+        g.save();
+        g.globalAlpha = a;
+        const r = g.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.3, w / 2, h / 2, Math.max(w, h) * 0.75);
+        r.addColorStop(0, 'rgba(0,0,0,0)');
+        r.addColorStop(1, 'rgba(0,0,0,0.7)');
+        g.fillStyle = r;
+        g.fillRect(0, 0, w, h);
+        g.restore();
+      };
+      break;
+    case 'vhs':
+      fx.glitch = (t % 2.1) < 0.08 ? 0.6 : 0;
+      fx.overlay = (g, w, h, a) => {
+        g.save();
+        g.globalAlpha = 0.18 * a;
+        g.fillStyle = '#000';
+        const step = Math.max(3, Math.round(h / 240));
+        for (let y = 0; y < h; y += step * 2) g.fillRect(0, y, w, step);
+        g.globalAlpha = 0.9 * a;
+        g.fillStyle = '#ffffff';
+        g.font = `700 ${Math.round(Math.min(w, h) * 0.04)}px "Courier New", monospace`;
+        g.textAlign = 'left';
+        g.fillText('PLAY ▶', w * 0.06, h * 0.08);
+        g.textAlign = 'right';
+        const ss = Math.floor(t);
+        g.fillText(`00:00:${String(ss).padStart(2, '0')}`, w * 0.94, h * 0.94);
+        g.restore();
+      };
+      break;
+  }
+  return fx;
 }
 
 function drawClipWithTransition(g, W, Hh, t) {
@@ -397,18 +586,49 @@ function drawClipWithTransition(g, W, Hh, t) {
   const tr = cur.transition;
   const prev = act.idx > 0 ? V.p.clips[act.idx - 1] : null;
   const pel = prev && V.els.get(prev.id);
-  if (prev && pel && tr && tr.type !== 'none' && local < tr.dur) {
+  const prevLocal = prev ? clipDur(prev) : 0;
+  const drawPrev = (o = {}) => drawMedia(g, pel, prev, W, Hh, { local: prevLocal, ...o });
+  const drawCur = (o = {}) => drawMedia(g, el, cur, W, Hh, { local, ...o });
+  if (prev && (pel || prev.type === 'color') && tr && tr.type !== 'none' && local < tr.dur) {
     const p = ease(local / tr.dur);
     switch (tr.type) {
       case 'fade':
-        drawMedia(g, pel, prev, W, Hh);
-        el && drawMedia(g, el, cur, W, Hh, { alpha: p });
+        drawPrev();
+        drawCur({ alpha: p });
+        return;
+      case 'zoomblur': {
+        const b = Math.round(Math.min(W, Hh) * 0.03);
+        if (local / tr.dur < 0.5) drawPrev({ scale: 1 + p * 0.5, blur: b * p * 2 });
+        else drawCur({ scale: 1.5 - (p - 0.5), blur: b * (1 - p) * 2 });
+        return;
+      }
+      case 'iris':
+        drawPrev();
+        g.save();
+        g.beginPath();
+        g.arc(W / 2, Hh / 2, Math.hypot(W, Hh) * 0.5 * p, 0, Math.PI * 2);
+        g.clip();
+        drawCur();
+        g.restore();
+        return;
+      case 'spin':
+        if (local / tr.dur < 0.5) drawPrev({ rot: p * Math.PI, scale: 1 - p * 0.6, alpha: 1 - p });
+        else drawCur({ rot: -(1 - p) * Math.PI, scale: 0.4 + p * 0.6, alpha: p });
+        return;
+      case 'glitch':
+        if (local / tr.dur < 0.5) drawPrev({ dx: Math.sin(local * 90) * W * 0.05 });
+        else drawCur({ dx: Math.sin(local * 90) * W * 0.05 });
+        g.save();
+        g.globalCompositeOperation = 'difference';
+        g.fillStyle = `rgba(0,255,200,${0.3 * (1 - Math.abs(local / tr.dur - 0.5) * 2)})`;
+        g.fillRect(0, Hh * ((local * 7) % 1), W, Hh * 0.12);
+        g.restore();
         return;
       case 'black':
       case 'white': {
         const half = local / tr.dur < 0.5;
-        if (half) drawMedia(g, pel, prev, W, Hh);
-        else el && drawMedia(g, el, cur, W, Hh);
+        if (half) drawPrev();
+        else drawCur();
         g.save();
         g.fillStyle = tr.type === 'black' ? '#000' : '#fff';
         g.globalAlpha = 1 - Math.abs(local / tr.dur - 0.5) * 2;
@@ -417,37 +637,35 @@ function drawClipWithTransition(g, W, Hh, t) {
         return;
       }
       case 'slide':
-        drawMedia(g, pel, prev, W, Hh, { dx: -W * p });
-        el && drawMedia(g, el, cur, W, Hh, { dx: W * (1 - p) });
+        drawPrev({ dx: -W * p });
+        drawCur({ dx: W * (1 - p) });
         return;
       case 'up':
-        drawMedia(g, pel, prev, W, Hh, { dy: -Hh * p });
-        el && drawMedia(g, el, cur, W, Hh, { dy: Hh * (1 - p) });
+        drawPrev({ dy: -Hh * p });
+        drawCur({ dy: Hh * (1 - p) });
         return;
       case 'zoom':
-        drawMedia(g, pel, prev, W, Hh, { scale: 1 + p * 0.6, alpha: 1 - p });
-        el && drawMedia(g, el, cur, W, Hh, { scale: 0.7 + 0.3 * p, alpha: p });
+        drawPrev({ scale: 1 + p * 0.6, alpha: 1 - p });
+        drawCur({ scale: 0.7 + 0.3 * p, alpha: p });
         return;
       case 'wipe':
-        drawMedia(g, pel, prev, W, Hh);
-        if (el) {
-          g.save();
-          g.beginPath();
-          g.rect(0, 0, W * p, Hh);
-          g.clip();
-          drawMedia(g, el, cur, W, Hh);
-          g.restore();
-        }
+        drawPrev();
+        g.save();
+        g.beginPath();
+        g.rect(0, 0, W * p, Hh);
+        g.clip();
+        drawCur();
+        g.restore();
         return;
       case 'blur': {
         const b = Math.round(Math.min(W, Hh) * 0.03);
-        drawMedia(g, pel, prev, W, Hh, { blur: b * p, alpha: 1 - p });
-        el && drawMedia(g, el, cur, W, Hh, { blur: b * (1 - p), alpha: p });
+        drawPrev({ blur: b * p, alpha: 1 - p });
+        drawCur({ blur: b * (1 - p), alpha: p });
         return;
       }
     }
   }
-  if (el) drawMedia(g, el, cur, W, Hh);
+  drawCur();
 }
 
 function animState(o, t) {
@@ -476,20 +694,68 @@ function animState(o, t) {
   return st;
 }
 
+/** Keyframed values of an overlay at local time lt. */
+function keyed(o, lt) {
+  const base = { x: o.x, y: o.y, size: o.size, scale: o.scale, opacity: o.opacity ?? 1 };
+  const ks = o.keys;
+  if (!ks || !ks.length) return base;
+  const sorted = [...ks].sort((a, b) => a.t - b.t);
+  if (lt <= sorted[0].t) return { ...base, ...sorted[0].v };
+  const last = sorted[sorted.length - 1];
+  if (lt >= last.t) return { ...base, ...last.v };
+  const i = sorted.findIndex((k) => k.t > lt);
+  const a = sorted[i - 1];
+  const b = sorted[i];
+  const p = ease((lt - a.t) / Math.max(0.001, b.t - a.t));
+  const out = { ...base };
+  for (const key of Object.keys(a.v)) if (typeof a.v[key] === 'number' && typeof b.v[key] === 'number') out[key] = a.v[key] + (b.v[key] - a.v[key]) * p;
+  return out;
+}
+
+const keyCanvas = document.createElement('canvas');
+/** Remove a solid backdrop colour (green screen) from a frame. */
+function chromaKey(src, hex, tol) {
+  const sw = src.videoWidth || src.naturalWidth;
+  const sh = src.videoHeight || src.naturalHeight;
+  const s = Math.min(1, 480 / Math.max(sw, sh));
+  const w = Math.max(1, Math.round(sw * s));
+  const h = Math.max(1, Math.round(sh * s));
+  keyCanvas.width = w;
+  keyCanvas.height = h;
+  const g = keyCanvas.getContext('2d', { willReadFrequently: true });
+  g.drawImage(src, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h);
+  const p = d.data;
+  const r0 = parseInt(hex.slice(1, 3), 16);
+  const g0 = parseInt(hex.slice(3, 5), 16);
+  const b0 = parseInt(hex.slice(5, 7), 16);
+  const max = (tol / 100) * 441;
+  const soft = max * 0.35;
+  for (let i = 0; i < p.length; i += 4) {
+    const dist = Math.hypot(p[i] - r0, p[i + 1] - g0, p[i + 2] - b0);
+    if (dist <= max) p[i + 3] = 0;
+    else if (dist <= max + soft) p[i + 3] = Math.round(((dist - max) / soft) * 255);
+  }
+  g.putImageData(d, 0, 0);
+  return keyCanvas;
+}
+
 function drawOverlays(g, W, Hh, t, hits) {
   const m = Math.min(W, Hh);
   for (const o of V.p.overlays) {
     if (t < o.start || t >= o.start + o.dur) continue;
     const a = animState(o, t);
-    const cx = (o.x + a.dx) * W;
-    const cy = (o.y + a.dy) * Hh;
+    const k = keyed(o, t - o.start);
+    const cx = (k.x + a.dx) * W;
+    const cy = (k.y + a.dy) * Hh;
     g.save();
-    g.globalAlpha = a.alpha * (o.opacity ?? 1);
+    g.globalAlpha = a.alpha * k.opacity;
     g.translate(cx, cy);
+    if (o.rot) g.rotate((o.rot * Math.PI) / 180);
     g.scale(a.scale, a.scale);
     let bw, bh;
     if (o.type === 'text') {
-      const size = o.size * m;
+      const size = k.size * m;
       g.font = `${o.italic ? 'italic ' : ''}${o.weight || 'normal'} ${size}px "${o.font}", sans-serif`;
       g.textBaseline = 'middle';
       const text = a.chars === Infinity ? o.text : (o.text || '').slice(0, a.chars);
@@ -531,9 +797,26 @@ function drawOverlays(g, W, Hh, t, hits) {
         if (o.glow) g.fillText(l, ax, y);
       });
     } else {
-      const img = o.emoji ? null : overlayImg(o);
-      const w = o.scale * m;
-      if (o.emoji) {
+      const img = o.type === 'video' ? V.oels.get(o.id) : o.emoji ? null : overlayImg(o);
+      const w = k.scale * m;
+      if (o.type === 'video') {
+        const vw = img?.videoWidth;
+        if (img && vw && img.readyState >= 2) {
+          const h = (w * img.videoHeight) / vw;
+          if (o.round) {
+            g.beginPath();
+            g.arc(0, 0, Math.min(w, h) / 2, 0, Math.PI * 2);
+            g.clip();
+          }
+          if (o.chroma) g.drawImage(chromaKey(img, o.chroma, o.chromaTol ?? 30), -w / 2, -h / 2, w, h);
+          else g.drawImage(img, -w / 2, -h / 2, w, h);
+          bw = w;
+          bh = h;
+        } else {
+          bw = w;
+          bh = w * 0.56;
+        }
+      } else if (o.emoji) {
         g.font = `${w * 0.85}px sans-serif`;
         g.textAlign = 'center';
         g.textBaseline = 'middle';
@@ -547,7 +830,8 @@ function drawOverlays(g, W, Hh, t, hits) {
           g.arc(0, 0, Math.min(w, h) / 2, 0, Math.PI * 2);
           g.clip();
         }
-        g.drawImage(img, -w / 2, -h / 2, w, h);
+        if (o.chroma) g.drawImage(chromaKey(img, o.chroma, o.chromaTol ?? 30), -w / 2, -h / 2, w, h);
+        else g.drawImage(img, -w / 2, -h / 2, w, h);
         bw = w;
         bh = h;
       } else {
@@ -653,9 +937,27 @@ function seek(t) {
   V.t = clamp(t, 0, totalDur());
   if (V.playing) {
     // force resync
+    V.p.overlays.forEach((o) => V.oels.get(o.id)?.pause?.());
     V.p.clips.forEach((c) => V.els.get(c.id)?.pause?.());
     V.p.audio.forEach((a) => V.aels.get(a.id)?.pause?.());
   }
+}
+
+// ---------- keyframes ----------
+function keyValues(o, lt) {
+  const k = keyed(o, lt);
+  return o.type === 'text' ? { x: k.x, y: k.y, size: k.size, opacity: k.opacity } : { x: k.x, y: k.y, scale: k.scale, opacity: k.opacity };
+}
+/** Write values into the keyframe at the playhead (creating one if needed). */
+function setKeyValue(o, vals) {
+  const lt = clamp(V.t - o.start, 0, o.dur);
+  o.keys = o.keys || [];
+  let k = o.keys.find((x) => Math.abs(x.t - lt) < 0.05);
+  if (!k) {
+    k = { t: +lt.toFixed(2), v: keyValues(o, lt) };
+    o.keys.push(k);
+  }
+  Object.assign(k.v, vals);
 }
 
 // ---------- editing ops ----------
@@ -752,6 +1054,64 @@ function splitAtPlayhead() {
   commit();
   H.toast('Split');
 }
+function replaceClip(c) {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = 'video/*,image/*';
+  inp.onchange = async () => {
+    const f = inp.files[0];
+    if (!f) return;
+    const m = await importFile(f);
+    if (!m || m.type === 'audio') return;
+    const keep = clipDur(c);
+    delete c.slot;
+    delete c.color;
+    c.mediaId = m.id;
+    if (m.type === 'image') {
+      c.type = 'image';
+      c.dur = keep;
+    } else {
+      c.type = 'video';
+      c.in = 0;
+      c.out = Math.min(m.duration, Math.max(0.5, keep * (c.speed || 1)));
+      delete c.dur;
+    }
+    V.els.delete(c.id);
+    await prepareAll();
+    commit();
+    renderPanel();
+  };
+  inp.click();
+}
+
+async function freezeFrame() {
+  const act = activeClip(V.t);
+  if (!act || act.clip.type !== 'video') return H.toast('Move the playhead over a video clip');
+  const el = V.els.get(act.clip.id);
+  if (!el?.videoWidth) return H.toast('The video frame is not ready yet');
+  const c = document.createElement('canvas');
+  c.width = el.videoWidth;
+  c.height = el.videoHeight;
+  c.getContext('2d').drawImage(el, 0, 0);
+  const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.92));
+  const m = await importFile(new File([blob], 'Freeze frame.jpg', { type: 'image/jpeg' }));
+  if (!m) return;
+  const local = V.t - act.start;
+  const i = act.idx;
+  const src = act.clip;
+  const freeze = { id: uid(), type: 'image', mediaId: m.id, dur: 2, speed: 1, fit: src.fit, filter: src.filter, adjust: { ...(src.adjust || {}) }, effect: 'none', tf: src.tf ? { ...src.tf } : undefined, transition: { type: 'none', dur: 0.5 } };
+  if (local > 0.1 && local < clipDur(src) - 0.1) {
+    const b = { ...structuredClone(src), id: uid(), transition: { type: 'none', dur: 0.5 } };
+    const cut = src.in + local * (src.speed || 1);
+    b.in = cut;
+    src.out = cut;
+    V.p.clips.splice(i + 1, 0, freeze, b);
+  } else V.p.clips.splice(local <= 0.1 ? i : i + 1, 0, freeze);
+  await prepareAll();
+  commit();
+  H.toast('Freeze frame added (2s)');
+}
+
 function moveClip(dir) {
   const s = findSel();
   if (V.sel?.kind !== 'clip' || !s) return;
@@ -840,20 +1200,22 @@ async function save() {
 
 // ---------- UI ----------
 const TABS = [
+  ['templates', 'layout', 'Templates'],
   ['media', 'upload', 'Media'],
   ['text', 'type', 'Text'],
+  ['captions', 'captions', 'Captions'],
   ['elements', 'shapes', 'Elements'],
   ['audio', 'music', 'Audio'],
-  ['designs', 'layout', 'Designs'],
+  ['designs', 'image', 'Designs'],
   ['ai', 'wand', 'AI'],
 ];
 
-export async function openVideoEditor(project, helpers) {
+export async function openVideoEditor(project, helpers, opts = {}) {
   H = helpers;
   closeVideoEditor();
   V = {
-    p: project, t: 0, playing: false, sel: null, els: new Map(), aels: new Map(), urls: new Map(), meta: new Map(),
-    pps: 60, hist: [], redo: [], tab: 'media', panelOpen: !H.isMobile(), inspectorOpen: false, hits: [], last: 0,
+    p: project, t: 0, playing: false, sel: null, els: new Map(), aels: new Map(), oels: new Map(), urls: new Map(), meta: new Map(),
+    pps: 60, hist: [], redo: [], tab: opts.tab || (project.clips.some((c) => c.slot) ? 'templates' : 'media'), panelOpen: !H.isMobile() || !!opts.tab, inspectorOpen: false, hits: [], last: 0,
   };
   for (const id of project.mediaIds || []) await mediaURL(id).catch(() => {});
   H.app.innerHTML = editorHTML();
@@ -875,7 +1237,7 @@ export function closeVideoEditor() {
   if (!V) return;
   cancelAnimationFrame(V.raf);
   V.playing = false;
-  for (const el of [...V.els.values(), ...V.aels.values()]) if (el instanceof HTMLMediaElement) { el.pause(); el.removeAttribute('src'); el.load?.(); }
+  for (const el of [...V.els.values(), ...V.aels.values(), ...V.oels.values()]) if (el instanceof HTMLMediaElement) { el.pause(); el.removeAttribute('src'); el.load?.(); }
   for (const u of V.urls.values()) URL.revokeObjectURL(u);
   V.ac?.close?.();
   window.removeEventListener('keydown', onKey);
@@ -1055,13 +1417,15 @@ function bindPreviewPointer() {
     const p = pos(e);
     const sel = V.sel?.kind === 'overlay' ? findSel() : null;
     if (sel && V.handle && Math.hypot(p.x - V.handle.x, p.y - V.handle.y) < V.handle.r) {
-      drag = { mode: 'resize', o: sel, start: p, size: sel.type === 'text' ? sel.size : sel.scale, hit: V.hits.find((h) => h.id === sel.id) };
+      const kv = keyed(sel, V.t - sel.start);
+      drag = { mode: 'resize', o: sel, start: p, size: sel.type === 'text' ? kv.size : kv.scale, hit: V.hits.find((h) => h.id === sel.id) };
     } else {
       const hit = [...V.hits].reverse().find((h) => p.x >= h.x && p.x <= h.x + h.w && p.y >= h.y && p.y <= h.y + h.h);
       if (hit) {
         const o = V.p.overlays.find((x) => x.id === hit.id);
         select({ kind: 'overlay', id: o.id }, { open: true });
-        drag = { mode: 'move', o, start: p, ox: o.x, oy: o.y };
+        const kv = keyed(o, V.t - o.start);
+        drag = { mode: 'move', o, start: p, ox: kv.x, oy: kv.y };
       } else {
         const act = activeClip(V.t);
         select(act ? { kind: 'clip', id: act.clip.id } : null, { open: true });
@@ -1073,8 +1437,10 @@ function bindPreviewPointer() {
     if (!drag) return;
     const p = pos(e);
     if (drag.mode === 'move') {
-      drag.o.x = clamp(drag.ox + (p.x - drag.start.x) / V.cw, -0.2, 1.2);
-      drag.o.y = clamp(drag.oy + (p.y - drag.start.y) / V.ch, -0.2, 1.2);
+      const nx = clamp(drag.ox + (p.x - drag.start.x) / V.cw, -0.2, 1.2);
+      const ny = clamp(drag.oy + (p.y - drag.start.y) / V.ch, -0.2, 1.2);
+      if (drag.o.keys?.length) setKeyValue(drag.o, { x: nx, y: ny });
+      else { drag.o.x = nx; drag.o.y = ny; }
     } else {
       const h = drag.hit;
       const cx = h.x + h.w / 2;
@@ -1082,8 +1448,10 @@ function bindPreviewPointer() {
       const d0 = Math.hypot(drag.start.x - cx, drag.start.y - cy);
       const d1 = Math.hypot(p.x - cx, p.y - cy);
       const f = clamp(d1 / Math.max(1, d0), 0.1, 10);
-      if (drag.o.type === 'text') drag.o.size = clamp(drag.size * f, 0.01, 0.5);
-      else drag.o.scale = clamp(drag.size * f, 0.03, 2);
+      const key = drag.o.type === 'text' ? 'size' : 'scale';
+      const v = clamp(drag.size * f, key === 'size' ? 0.01 : 0.03, key === 'size' ? 0.5 : 2);
+      if (drag.o.keys?.length) setKeyValue(drag.o, { [key]: v });
+      else drag.o[key] = v;
     }
   });
   const end = () => {
@@ -1138,13 +1506,15 @@ function renderTimeline() {
       const m = V.meta.get(c.mediaId) || {};
       const d = clipDur(c);
       const tr = c.transition?.type && c.transition.type !== 'none' && i > 0 ? `<span class="tl-tr" title="Transition: ${c.transition.type}">⧓</span>` : '';
-      return `<div class="tl-block clip ${isSel('clip', c.id) ? 'sel' : ''}" data-kind="clip" data-id="${c.id}" style="left:${starts[i] * pps}px;width:${Math.max(6, d * pps - 2)}px;${m.thumb ? `background-image:url(${m.thumb})` : ''}">
-        ${tr}<span class="tl-label">${H.esc(m.name || c.type)} · ${d.toFixed(1)}s${c.speed && c.speed !== 1 ? ` · ${c.speed}×` : ''}</span><i class="h-l"></i><i class="h-r"></i></div>`;
+      const bg = c.type === 'color' ? `background:${c.color}` : m.thumb ? `background-image:url(${m.thumb})` : '';
+      const name = c.type === 'color' ? (c.slot ? `Clip ${c.slot}` : 'Color') : m.name || c.type;
+      return `<div class="tl-block clip ${isSel('clip', c.id) ? 'sel' : ''}" data-kind="clip" data-id="${c.id}" style="left:${starts[i] * pps}px;width:${Math.max(6, d * pps - 2)}px;${bg}">
+        ${tr}<span class="tl-label">${H.esc(name)} · ${d.toFixed(1)}s${c.speed && c.speed !== 1 ? ` · ${c.speed}×` : ''}${c.effect && c.effect !== 'none' ? ' · ✦' : ''}</span><i class="h-l"></i><i class="h-r"></i></div>`;
     })
     .join('');
   const ovBlocks = ov.out
     .map(([o, l]) => `<div class="tl-block ov ${o.type} ${isSel('overlay', o.id) ? 'sel' : ''}" data-kind="overlay" data-id="${o.id}" style="left:${o.start * pps}px;width:${Math.max(6, o.dur * pps - 2)}px;top:${l * 30}px">
-      <span class="tl-label">${o.type === 'text' ? 'T  ' + H.esc((o.text || '').split('\n')[0]) : o.emoji || 'Image'}</span><i class="h-l"></i><i class="h-r"></i></div>`)
+      <span class="tl-label">${o.type === 'text' ? (o.caption ? 'CC ' : 'T  ') + H.esc((o.text || '').split('\n')[0]) : o.type === 'video' ? '▶ Video overlay' : o.emoji || 'Image'}${o.keys?.length ? ' ◆' : ''}</span><i class="h-l"></i><i class="h-r"></i></div>`)
     .join('');
   const auBlocks = au.out
     .map(([a, l]) => `<div class="tl-block au ${isSel('audio', a.id) ? 'sel' : ''}" data-kind="audio" data-id="${a.id}" style="left:${a.start * pps}px;width:${Math.max(6, (a.out - a.in) * pps - 2)}px;top:${l * 30}px">
@@ -1294,13 +1664,27 @@ async function renderPanel() {
     p.innerHTML = `<h3>Media</h3>
       <button class="btn primary block" id="vImport">${H.icon('upload')} Import videos & photos</button>
       <p class="muted">Or drag files anywhere onto the editor. Click a file to add it to the end of your video.</p>
-      <div class="v-media">${items.map(([id, m]) => `<button class="v-media-item" data-mid="${id}" title="${H.esc(m.name)}">${m.thumb ? `<img src="${m.thumb}" alt="">` : ''}<span>${m.type === 'video' ? fmt(m.duration).replace(/\.\d$/, '') : 'Photo'}</span></button>`).join('') || '<p class="muted">Nothing imported yet.</p>'}</div>`;
+      <div class="v-media">${items.map(([id, m]) => `<div class="v-media-wrap"><button class="v-media-item" data-mid="${id}" title="Add ${H.esc(m.name)} to the end">${m.thumb ? `<img src="${m.thumb}" alt="">` : ''}<span>${m.type === 'video' ? fmt(m.duration).replace(/\.\d$/, '') : 'Photo'}</span></button><button class="v-pip" data-pip="${id}" title="Add as overlay (picture-in-picture)">PiP</button></div>`).join('') || '<p class="muted">Nothing imported yet.</p>'}</div>
+      <p class="muted mt"><b>PiP</b> puts a video or photo on top of your main video — use it for reactions, logos or green-screen clips.</p>
+      <h4>Blank clip</h4>
+      <div class="row"><input type="color" id="vColorClip" value="#111111"><button class="btn ghost small" id="vAddColor">Add color clip (3s)</button></div>`;
     $('#vImport').onclick = () => $('#vFile').click();
     $$('[data-mid]', p).forEach((b) => (b.onclick = () => {
       const m = V.meta.get(b.dataset.mid);
       addClip(b.dataset.mid, m.type, m.duration);
       commit();
     }));
+    $$('[data-pip]', p).forEach((b) => (b.onclick = async () => {
+      const id = b.dataset.pip;
+      const m = V.meta.get(id);
+      if (m.type === 'video') addOverlay({ type: 'video', mediaId: id, in: 0, dur: Math.min(m.duration, 10), scale: 0.45, x: 0.7, y: 0.3, volume: 1, animIn: 'pop' });
+      else addOverlay({ type: 'image', mediaId: id, scale: 0.45, x: 0.7, y: 0.3, animIn: 'pop' });
+      await prepareAll();
+    }));
+    $('#vAddColor', p).onclick = () => {
+      V.p.clips.push({ id: uid(), type: 'color', color: $('#vColorClip', p).value, dur: 3, speed: 1, fit: 'fill', filter: 'none', adjust: {}, effect: 'none', transition: { type: 'none', dur: 0.5 } });
+      commit();
+    };
   } else if (tab === 'text') {
     p.innerHTML = `<h3>Text</h3><p class="muted">Added at the playhead for 3 seconds. Drag it on the video to move it; drag the dot to resize.</p>
       <div class="v-text-grid">${TEXT_PRESETS.map((t, i) => `<button class="v-text-item" data-tp="${i}" style="font-family:'${t.font}';font-weight:${t.weight};${t.italic ? 'font-style:italic;' : ''}color:${t.bg ? '#111' : t.color === '#ffffff' || t.color === '#fdf4ff' ? '#fff' : t.color};${t.bg ? `background:${t.bg};${t.bg === '#7c3aed' ? 'color:#fff;' : ''}` : 'background:#1f1a2e;'}${t.stroke ? '-webkit-text-stroke:1px #000;' : ''}${t.glow ? `text-shadow:0 0 8px ${t.glow};` : ''}">${H.esc(t.label)}</button>`).join('')}</div>`;
@@ -1359,6 +1743,212 @@ async function renderPanel() {
       commit();
     }));
   } else if (tab === 'ai') renderAIPanel(p);
+  else if (tab === 'templates') renderTemplatesPanel(p);
+  else if (tab === 'captions') renderCaptionsPanel(p);
+}
+
+function templateCard(tpl) {
+  const dur = templateDuration(tpl);
+  const sample = (tpl.layers.find((l) => l.text) || {}).text || tpl.name;
+  return `<button class="vt-card" data-vt="${tpl.id}" style="--tc:${tpl.color}">
+    <div class="vt-thumb"><span class="vt-sample">${H.esc(sample.split('\n')[0])}</span><span class="vt-meta">${tpl.slots.length} clips · ${dur.toFixed(0)}s</span></div>
+    <b>${H.esc(tpl.name)}</b></button>`;
+}
+
+function renderTemplatesPanel(p) {
+  const slots = V.p.clips.filter((c) => c.slot).length;
+  const cat = V.vtCat || 'All';
+  p.innerHTML = `<h3>Video templates</h3>
+    ${slots ? `<div class="ai-fill"><b>Add your ${slots} photo${slots > 1 ? 's' : ''} or video${slots > 1 ? 's' : ''}</b>
+      <p class="muted">They fill the clip slots in order. Pick fewer and they repeat.</p>
+      <button class="btn primary block" id="vtFill">${H.icon('upload')} Choose photos & videos</button></div>` : ''}
+    <p class="muted">Tap a template to apply it — then add your clips. Cuts, effects, transitions and text are set up for you.</p>
+    <div class="chips">${VT_CATS.map((c) => `<button class="chip ${c === cat ? 'on' : ''}" data-vtc="${c}">${c}</button>`).join('')}</div>
+    <div class="vt-grid">${VIDEO_TEMPLATES.filter((t) => cat === 'All' || t.cat === cat).map(templateCard).join('')}</div>`;
+  $$('[data-vtc]', p).forEach((b) => (b.onclick = () => { V.vtCat = b.dataset.vtc; renderTemplatesPanel(p); }));
+  $$('[data-vt]', p).forEach((b) => (b.onclick = () => applyTemplate(b.dataset.vt)));
+  const f = $('#vtFill', p);
+  if (f) f.onclick = () => pickAndFillSlots();
+}
+
+export function applyTemplate(id, media = []) {
+  const tpl = VIDEO_TEMPLATES.find((t) => t.id === id);
+  if (!tpl) return;
+  const { clips, overlays } = buildFromTemplate(tpl, media);
+  V.p.clips = clips;
+  V.p.overlays = overlays;
+  V.sel = null;
+  V.t = 0;
+  prepareAll();
+  fitTimeline();
+  commit();
+  if (V.tab === 'templates') renderPanel();
+  H.toast(media.length ? `${tpl.name} applied` : `${tpl.name} applied — now add your clips`);
+}
+
+function pickAndFillSlots() {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = 'video/*,image/*';
+  inp.multiple = true;
+  inp.onchange = async () => {
+    const files = [...inp.files];
+    if (!files.length) return;
+    H.toast(`Importing ${files.length} file(s)…`);
+    const media = [];
+    for (const f of files) {
+      const m = await importFile(f);
+      if (m && m.type !== 'audio') media.push(m);
+    }
+    if (!media.length) return;
+    let i = 0;
+    V.p.clips.forEach((c) => {
+      if (!c.slot) return;
+      const m = media[i % media.length];
+      const reuse = Math.floor(i / media.length);
+      i++;
+      const dur = c.dur;
+      delete c.slot;
+      delete c.color;
+      c.mediaId = m.id;
+      if (m.type === 'image') {
+        c.type = 'image';
+        c.dur = dur;
+      } else {
+        c.type = 'video';
+        c.in = Math.min(Math.max(0, (m.duration || dur) - dur), reuse * dur);
+        c.out = Math.min(m.duration || dur, c.in + dur);
+        delete c.dur;
+      }
+    });
+    await prepareAll();
+    commit();
+    renderPanel();
+    H.toast('Your clips are in!');
+  };
+  inp.click();
+}
+
+const CAPTION_STYLES = [
+  { id: 'box', label: 'White box', st: { font: 'DM Sans', weight: '700', size: 0.045, color: '#111111', bg: '#ffffff' } },
+  { id: 'bold', label: 'Bold outline', st: { font: 'Anton', weight: 'normal', size: 0.065, color: '#ffffff', stroke: '#000000' } },
+  { id: 'yellow', label: 'Yellow pop', st: { font: 'Bricolage Grotesque', weight: '800', size: 0.055, color: '#fde047', stroke: '#000000' } },
+  { id: 'dark', label: 'Dark box', st: { font: 'DM Sans', weight: '700', size: 0.045, color: '#ffffff', bg: 'rgba(0,0,0,0.65)' } },
+  { id: 'neon', label: 'Neon', st: { font: 'Unbounded', weight: '900', size: 0.045, color: '#fdf4ff', glow: '#e879f9' } },
+];
+
+function captionOverlay(text, start, end) {
+  const cs = CAPTION_STYLES.find((c) => c.id === (V.capStyle || 'box')) || CAPTION_STYLES[0];
+  const y = { bottom: 0.8, middle: 0.55, top: 0.18 }[V.capPos || 'bottom'];
+  return {
+    id: uid(), type: 'text', caption: true, text, start, dur: Math.max(0.4, end - start), x: 0.5, y, opacity: 1, align: 'center', animIn: 'pop', animOut: 'none',
+    italic: false, bg: '', stroke: '', glow: '', shadow: false, ...cs.st,
+  };
+}
+
+function renderCaptionsPanel(p) {
+  const n = V.p.overlays.filter((o) => o.caption).length;
+  V.cap = V.cap || { busy: false, status: '', quality: 'fast', lang: '' };
+  const c = V.cap;
+  p.innerHTML = `<h3>Captions</h3>
+    <h4>Style</h4>
+    <div class="cap-grid">${CAPTION_STYLES.map((cs) => `<button class="cap-item ${cs.id === (V.capStyle || 'box') ? 'on' : ''}" data-cs="${cs.id}" style="font-family:'${cs.st.font}';color:${cs.st.color};${cs.st.bg ? `background:${cs.st.bg};` : 'background:#2a2340;'}${cs.st.stroke ? '-webkit-text-stroke:1px #000;' : ''}${cs.st.glow ? `text-shadow:0 0 8px ${cs.st.glow};background:#1f1235;` : ''}">${cs.label}</button>`).join('')}</div>
+    <div class="field mt"><label>Position</label><div class="seg">${['top', 'middle', 'bottom'].map((x) => `<button data-cp="${x}" class="${(V.capPos || 'bottom') === x ? 'on' : ''}">${x}</button>`).join('')}</div></div>
+    <div class="ai-fill"><b>Auto captions</b>
+      <p class="muted">Listens to the speech in your clips and writes timed captions. Runs privately in your browser — the first time it downloads a speech model (~40–75 MB).</p>
+      <div class="grid2"><label>Accuracy<select id="capQ"><option value="fast" ${c.quality === 'fast' ? 'selected' : ''}>Fast</option><option value="accurate" ${c.quality === 'accurate' ? 'selected' : ''}>More accurate</option></select></label>
+      <label>Language<select id="capL">${[['', 'Auto-detect'], ['english', 'English'], ['chinese', 'Chinese'], ['malay', 'Malay'], ['indonesian', 'Indonesian'], ['spanish', 'Spanish'], ['japanese', 'Japanese'], ['korean', 'Korean'], ['thai', 'Thai'], ['vietnamese', 'Vietnamese'], ['hindi', 'Hindi'], ['french', 'French']].map(([v, l]) => `<option value="${v}" ${c.lang === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label></div>
+      <label class="row"><input type="checkbox" id="capAudio" ${c.audio ? 'checked' : ''}> Also caption voice-over tracks</label>
+      <div class="field"><label>Words per caption</label><div class="seg">${[2, 3, 4, 6, 99].map((n) => `<button data-cw="${n}" class="${(c.words || 4) === n ? 'on' : ''}">${n === 99 ? 'Full line' : n}</button>`).join('')}</div></div>
+      <button class="btn primary block" id="capAuto" ${c.busy ? 'disabled' : ''}>${H.icon('captions')} ${c.busy ? 'Working…' : 'Generate captions'}</button>
+      <p class="muted" id="capStatus">${H.esc(c.status || '')}</p></div>
+    <h4>From your script</h4>
+    <textarea class="search" id="capScript" rows="5" placeholder="Paste or type what is said. Each line or sentence becomes one caption, spread across the video."></textarea>
+    <button class="btn ghost block mt" id="capFromScript">Add captions from script</button>
+    ${n ? `<button class="btn ghost block" id="capApply">Apply current style to all ${n} captions</button><button class="btn ghost block" id="capClear">Remove all captions</button>` : ''}`;
+  $$('[data-cs]', p).forEach((b) => (b.onclick = () => { V.capStyle = b.dataset.cs; renderCaptionsPanel(p); }));
+  $$('[data-cp]', p).forEach((b) => (b.onclick = () => { V.capPos = b.dataset.cp; renderCaptionsPanel(p); }));
+  $('#capQ', p).onchange = (e) => (c.quality = e.target.value);
+  $('#capL', p).onchange = (e) => (c.lang = e.target.value);
+  $('#capAudio', p).onchange = (e) => (c.audio = e.target.checked);
+  $$('[data-cw]', p).forEach((b) => (b.onclick = () => { c.words = +b.dataset.cw; renderCaptionsPanel(p); }));
+  $('#capFromScript', p).onclick = () => {
+    const lines = scriptToLines($('#capScript', p).value);
+    if (!lines.length) return H.toast('Type or paste your script first');
+    const span = mainDur() || totalDur();
+    const weights = lines.map((l) => Math.max(4, l.length));
+    const sum = weights.reduce((a, b) => a + b, 0);
+    let t0 = 0;
+    lines.forEach((l, i) => {
+      const d = (weights[i] / sum) * span;
+      V.p.overlays.push(captionOverlay(l, t0, t0 + d));
+      t0 += d;
+    });
+    commit();
+    H.toast(`${lines.length} captions added`);
+    renderCaptionsPanel(p);
+  };
+  const ap = $('#capApply', p);
+  if (ap) ap.onclick = () => {
+    V.p.overlays = V.p.overlays.map((o) => (o.caption ? { ...captionOverlay(o.text, o.start, o.start + o.dur), id: o.id } : o));
+    commit();
+  };
+  const cl = $('#capClear', p);
+  if (cl) cl.onclick = () => { V.p.overlays = V.p.overlays.filter((o) => !o.caption); commit(); renderCaptionsPanel(p); };
+  $('#capAuto', p).onclick = () => runAutoCaptions(p);
+}
+
+async function runAutoCaptions(p) {
+  const c = V.cap;
+  const status = (m) => { c.status = m; const el = $('#capStatus'); if (el) el.textContent = m; };
+  const jobs = [];
+  const starts = clipStarts();
+  V.p.clips.forEach((clip, i) => {
+    if (clip.type === 'video' && !clip.muted) jobs.push({ mediaId: clip.mediaId, inSec: clip.in, outSec: clip.out, at: starts[i], speed: clip.speed || 1 });
+  });
+  if (c.audio) V.p.audio.forEach((a) => jobs.push({ mediaId: a.mediaId, inSec: a.in, outSec: a.out, at: a.start, speed: 1 }));
+  if (!jobs.length) return H.toast('Add a video clip with speech first');
+  c.busy = true;
+  renderCaptionsPanel(p);
+  let added = 0;
+  try {
+    const fresh = [];
+    for (let j = 0; j < jobs.length; j++) {
+      const job = jobs[j];
+      const m = await getMedia(job.mediaId);
+      if (!m) continue;
+      const pre = jobs.length > 1 ? `Clip ${j + 1}/${jobs.length}: ` : '';
+      const segs = await transcribeMedia(m.blob, { inSec: job.inSec, outSec: job.outSec, quality: c.quality, language: c.lang || undefined, onStatus: (s2) => status(pre + s2) });
+      for (const sg of segs) {
+        // short, punchy caption groups (about 4 words) spread across the spoken time
+        const words = sg.text.split(/\s+/).filter(Boolean);
+        const size = c.words || 4;
+        const groups = [];
+        for (let w = 0; w < words.length; w += size) groups.push(words.slice(w, w + size).join(' '));
+        const t0 = job.at + sg.start / job.speed;
+        const t1 = job.at + sg.end / job.speed;
+        const total = groups.reduce((a2, g2) => a2 + g2.length, 0) || 1;
+        let cur = t0;
+        groups.forEach((g2) => {
+          const d = ((t1 - t0) * g2.length) / total;
+          fresh.push(captionOverlay(g2, cur, cur + d));
+          cur += d;
+        });
+      }
+    }
+    if (fresh.length) {
+      V.p.overlays = V.p.overlays.filter((o) => !o.caption).concat(fresh);
+      added = fresh.length;
+      commit();
+    }
+    c.status = added ? `Added ${added} captions. Tap one on the timeline to edit its text.` : 'No speech found in your clips.';
+  } catch (e) {
+    console.error(e);
+    c.status = e.message || 'Auto captions failed.';
+    H.toast(c.status);
+  }
+  c.busy = false;
+  if (V?.tab === 'captions') renderCaptionsPanel(p);
 }
 
 function renderAIPanel(p) {
@@ -1435,12 +2025,23 @@ function renderInspector() {
   if (tg) tg.classList.toggle('on', !!V.inspectorOpen);
   if (!s) {
     el.innerHTML = `<h3>Video</h3>
-      <div class="field"><label>Size</label><select id="vSize">${VIDEO_PRESETS.map((pr) => `<option value="${pr.w}x${pr.h}" ${pr.w === V.p.width && pr.h === V.p.height ? 'selected' : ''}>${pr.name} (${pr.w}×${pr.h})</option>`).join('')}</select></div>
+      <div class="field"><label>Size</label><select id="vSize">${[...new Set(ALL_VIDEO_SIZES.map((x) => x.group))].map((g) => `<optgroup label="${g}">${ALL_VIDEO_SIZES.filter((x) => x.group === g).map((pr) => `<option value="${pr.w}x${pr.h}" ${pr.w === V.p.width && pr.h === V.p.height ? 'selected' : ''}>${pr.name} (${pr.w}×${pr.h})</option>`).join('')}</optgroup>`).join('')}<option value="custom">Custom size…</option></select></div>
+      <div class="grid2" id="vCustom" hidden><label>Width<input type="number" id="vCW" value="${V.p.width}" min="64" max="4096"></label><label>Height<input type="number" id="vCH" value="${V.p.height}" min="64" max="4096"></label><button class="btn ghost small" id="vCApply">Apply size</button></div>
       <div class="field"><label>Background color</label><input type="color" id="vBg" value="${V.p.bg || '#000000'}"></div>
       <p class="muted">${V.p.clips.length} clip(s) · ${V.p.overlays.length} text/sticker(s) · ${V.p.audio.length} audio · length ${fmt(totalDur())}</p>
       <h4>Shortcuts</h4>
       <ul class="shortcuts"><li><kbd>Space</kbd> Play / pause</li><li><kbd>S</kbd> Split at playhead</li><li><kbd>Del</kbd> Delete</li><li><kbd>←</kbd> <kbd>→</kbd> Step a frame (Shift: 1s)</li><li><kbd>Ctrl</kbd>+<kbd>Z</kbd> Undo</li></ul>`;
+    const setSize = (w, h) => {
+      V.p.width = w;
+      V.p.height = h;
+      sizeCanvas();
+      commit();
+      const dl = $('.dim-label');
+      if (dl) dl.textContent = `${w} × ${h}`;
+    };
+    $('#vCApply').onclick = () => setSize(clamp(Math.round(+$('#vCW').value || 1080), 64, 4096), clamp(Math.round(+$('#vCH').value || 1920), 64, 4096));
     $('#vSize').onchange = (e) => {
+      if (e.target.value === 'custom') return ($('#vCustom').hidden = false);
       const [w, h] = e.target.value.split('x').map(Number);
       V.p.width = w;
       V.p.height = h;
@@ -1455,14 +2056,25 @@ function renderInspector() {
   if (kind === 'clip') {
     const m = V.meta.get(s.mediaId) || {};
     const idx = V.p.clips.indexOf(s);
-    el.innerHTML = `<h3>${s.type === 'image' ? 'Photo clip' : 'Video clip'}</h3>
+    const tf = s.tf || {};
+    el.innerHTML = `<h3>${s.type === 'image' ? 'Photo clip' : s.type === 'color' ? (s.slot ? `Template clip ${s.slot}` : 'Color clip') : 'Video clip'}</h3>
       <p class="muted">${H.esc(m.name || '')} · ${clipDur(s).toFixed(1)}s on the timeline</p>
-      ${s.type === 'image'
+      <div class="row wrap"><button class="btn ${s.type === 'color' ? 'primary' : 'ghost'} small" id="cReplace">${H.icon('upload', 14)} ${s.type === 'color' ? 'Add your clip' : 'Replace'}</button>
+        ${s.type === 'video' ? `<button class="btn ghost small" id="cFreeze">Freeze frame</button>` : ''}</div>
+      ${s.type === 'color' ? `<div class="field mt"><label>Color</label><input type="color" id="cColor" value="${/^#/.test(s.color || '') ? s.color : '#222222'}"></div>` : ''}
+      ${s.type === 'image' || s.type === 'color'
         ? `<div class="field"><label>Duration <b>${s.dur.toFixed(1)}s</b></label><input type="range" id="cDur" min="0.5" max="15" step="0.1" value="${s.dur}"></div>`
         : `<div class="field"><label>Speed</label><div class="seg wrap">${[0.25, 0.5, 1, 1.5, 2, 3].map((v) => `<button data-spd="${v}" class="${(s.speed || 1) === v ? 'on' : ''}">${v}×</button>`).join('')}</div></div>
            <div class="field"><label>Volume <b>${Math.round((s.volume ?? 1) * 100)}%</b></label><input type="range" id="cVol" min="0" max="2" step="0.05" value="${s.volume ?? 1}"></div>
            <label class="row"><input type="checkbox" id="cMute" ${s.muted ? 'checked' : ''}> Mute clip sound</label>`}
       <div class="field mt"><label>Framing</label><div class="seg"><button data-fit="fill" class="${s.fit !== 'fit' ? 'on' : ''}">Fill frame</button><button data-fit="fit" class="${s.fit === 'fit' ? 'on' : ''}">Fit + blur</button></div></div>
+      <h4>Effect</h4>
+      <div class="filter-grid">${EFFECTS.map(([id, l]) => `<button data-fx="${id}" class="${(s.effect || 'none') === id ? 'on' : ''}">${l}</button>`).join('')}</div>
+      ${s.type !== 'color' ? `<h4>Crop & position</h4>
+      <label class="frow">Zoom <input type="range" id="tZoom" min="1" max="3" step="0.02" value="${tf.zoom || 1}"></label>
+      <label class="frow">Move left / right <input type="range" id="tX" min="-1" max="1" step="0.01" value="${tf.x || 0}"></label>
+      <label class="frow">Move up / down <input type="range" id="tY" min="-1" max="1" step="0.01" value="${tf.y || 0}"></label>
+      <div class="row wrap"><button class="btn ghost small" id="tRot">Rotate 90°</button><button class="btn ghost small" id="tFx">Flip ↔</button><button class="btn ghost small" id="tFy">Flip ↕</button><button class="btn ghost small" id="tReset">Reset</button></div>` : ''}
       <h4>Filter</h4>
       <div class="filter-grid">${FILTERS.map((f) => `<button data-flt="${f.id}" class="${(s.filter || 'none') === f.id ? 'on' : ''}">${f.label}</button>`).join('')}</div>
       <h4>Adjust</h4>
@@ -1479,6 +2091,20 @@ function renderInspector() {
       </div>`;
     const on = (id, ev, fn) => { const x = $(id, el); if (x) x[ev] = fn; };
     on('#cDur', 'oninput', (e) => { s.dur = +e.target.value; renderTimelineLive(); });
+    on('#cReplace', 'onclick', () => replaceClip(s));
+    on('#cFreeze', 'onclick', freezeFrame);
+    on('#cColor', 'oninput', (e) => { s.color = e.target.value; });
+    on('#cColor', 'onchange', () => commit());
+    $$('[data-fx]', el).forEach((b) => (b.onclick = () => { s.effect = b.dataset.fx; commit(); seek(clipStarts()[idx]); }));
+    const setTf = (k, v) => { s.tf = { ...(s.tf || {}), [k]: v }; };
+    on('#tZoom', 'oninput', (e) => setTf('zoom', +e.target.value));
+    on('#tX', 'oninput', (e) => setTf('x', +e.target.value));
+    on('#tY', 'oninput', (e) => setTf('y', +e.target.value));
+    ['#tZoom', '#tX', '#tY'].forEach((id) => on(id, 'onchange', () => commit()));
+    on('#tRot', 'onclick', () => { setTf('rot', ((tf.rot || 0) + 90) % 360); commit(); });
+    on('#tFx', 'onclick', () => { setTf('fx', !tf.fx); commit(); });
+    on('#tFy', 'onclick', () => { setTf('fy', !tf.fy); commit(); });
+    on('#tReset', 'onclick', () => { s.tf = {}; commit(); });
     on('#cDur', 'onchange', () => commit());
     $$('[data-spd]', el).forEach((b) => (b.onclick = () => { s.speed = +b.dataset.spd; commit(); }));
     on('#cVol', 'oninput', (e) => { s.volume = +e.target.value; });
@@ -1514,7 +2140,18 @@ function renderInspector() {
         <label>Glow<span class="row"><input type="checkbox" id="oGlOn" ${s.glow ? 'checked' : ''}><input type="color" id="oGl" value="${s.glow || '#e879f9'}"></span></label></div>
       <label class="row mt"><input type="checkbox" id="oShadow" ${s.shadow ? 'checked' : ''}> Drop shadow</label>`
       : `<div class="field"><label>Size <b>${Math.round(s.scale * 100)}</b></label><input type="range" id="oScale" min="0.05" max="1.5" step="0.01" value="${s.scale}"></div>
-         ${s.emoji ? '' : `<label class="row"><input type="checkbox" id="oRound" ${s.round ? 'checked' : ''}> Circle crop</label>`}`}
+         ${s.emoji ? '' : `<label class="row"><input type="checkbox" id="oRound" ${s.round ? 'checked' : ''}> Circle crop</label>`}
+         ${s.type === 'video' ? `<div class="field mt"><label>Volume <b>${Math.round((s.volume ?? 1) * 100)}%</b></label><input type="range" id="oVol" min="0" max="2" step="0.05" value="${s.volume ?? 1}"></div>
+           <label class="row"><input type="checkbox" id="oMute" ${s.muted ? 'checked' : ''}> Mute</label>` : ''}
+         ${s.emoji ? '' : `<h4>Green screen (chroma key)</h4>
+           <label class="row"><input type="checkbox" id="oChroma" ${s.chroma ? 'checked' : ''}> Remove background color</label>
+           <div class="row mt"><input type="color" id="oChromaC" value="${s.chroma || '#00ff00'}"><button class="btn ghost small" data-ck="#00ff00">Green</button><button class="btn ghost small" data-ck="#0000ff">Blue</button><button class="btn ghost small" data-ck="#ffffff">White</button></div>
+           <label class="frow mt">Strength <input type="range" id="oChromaT" min="5" max="70" value="${s.chromaTol ?? 30}"></label>`}`}
+      <div class="field mt"><label>Rotation <b>${Math.round(s.rot || 0)}°</b></label><input type="range" id="oRot" min="-180" max="180" step="1" value="${s.rot || 0}"></div>
+      <h4>Keyframes ${s.keys?.length ? `<small class="muted">(${s.keys.length})</small>` : ''}</h4>
+      <p class="muted">Add a keyframe, move the playhead, then drag or resize the item on the video — it animates between keyframes.</p>
+      <div class="row wrap"><button class="btn ghost small" id="kAdd">◆ Add keyframe at playhead</button>${s.keys?.length ? `<button class="btn ghost small" id="kClear">Remove keyframes</button>` : ''}</div>
+      ${s.keys?.length ? `<div class="kf-list">${[...s.keys].sort((a, b) => a.t - b.t).map((k, i) => `<button class="kf" data-kt="${k.t}">◆ ${(s.start + k.t).toFixed(1)}s</button>`).join('')}</div>` : ''}
       <div class="field mt"><label>Opacity <b>${Math.round((s.opacity ?? 1) * 100)}%</b></label><input type="range" id="oOp" min="0.1" max="1" step="0.05" value="${s.opacity ?? 1}"></div>
       <div class="grid2"><label>Animation in<select id="oIn">${ANIM_IN.filter(([id]) => isText || id !== 'type').map(([id, l]) => `<option value="${id}" ${s.animIn === id ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
         <label>Animation out<select id="oOut">${ANIM_OUT.map(([id, l]) => `<option value="${id}" ${s.animOut === id ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
@@ -1544,6 +2181,30 @@ function renderInspector() {
     pair('#oGlOn', '#oGl', 'glow');
     on('#oShadow', 'onchange', (e) => { s.shadow = e.target.checked; commit(); });
     on('#oRound', 'onchange', (e) => { s.round = e.target.checked; commit(); });
+    on('#oVol', 'oninput', (e) => { s.volume = +e.target.value; });
+    on('#oVol', 'onchange', () => commit());
+    on('#oMute', 'onchange', (e) => { s.muted = e.target.checked; commit(); });
+    on('#oChroma', 'onchange', (e) => { s.chroma = e.target.checked ? $('#oChromaC', el).value : ''; commit(); });
+    on('#oChromaC', 'oninput', (e) => { s.chroma = e.target.value; $('#oChroma', el).checked = true; });
+    on('#oChromaC', 'onchange', () => commit());
+    $$('[data-ck]', el).forEach((b) => (b.onclick = () => { s.chroma = b.dataset.ck; commit(); }));
+    on('#oChromaT', 'oninput', (e) => { s.chromaTol = +e.target.value; });
+    on('#oChromaT', 'onchange', () => commit());
+    on('#oRot', 'oninput', (e) => { s.rot = +e.target.value; });
+    on('#oRot', 'onchange', () => commit());
+    on('#kAdd', 'onclick', () => {
+      if (V.t < s.start || V.t > s.start + s.dur) seek(s.start);
+      setKeyValue(s, {});
+      commit();
+      H.toast('Keyframe added — move the playhead and drag the item to animate it');
+    });
+    on('#kClear', 'onclick', () => {
+      const k = keyed(s, V.t - s.start);
+      Object.assign(s, { x: k.x, y: k.y, opacity: k.opacity, ...(s.type === 'text' ? { size: k.size } : { scale: k.scale }) });
+      s.keys = [];
+      commit();
+    });
+    $$('[data-kt]', el).forEach((b) => (b.onclick = () => seek(s.start + +b.dataset.kt)));
     on('#oOp', 'oninput', (e) => { s.opacity = +e.target.value; });
     on('#oOp', 'onchange', () => commit());
     on('#oIn', 'onchange', (e) => { s.animIn = e.target.value; commit(); seek(s.start); });
@@ -1584,7 +2245,7 @@ function openExport() {
   m.innerHTML = `<div class="modal small">
     <h3>Export video</h3>
     <p class="muted">Length ${fmt(totalDur())}. Exporting plays your video once in real time, so keep this tab open.</p>
-    <div class="field"><label>Quality</label><select id="exRes">${[480, 720, 1080].filter((r) => r <= short).map((r) => `<option value="${r}" ${r === Math.min(1080, short) ? 'selected' : ''}>${r}p</option>`).join('') || `<option value="${short}">${short}p</option>`}</select></div>
+    <div class="field"><label>Quality</label><select id="exRes">${[...new Set([480, 720, 1080, 1440, 2160, short].filter((r) => r <= short))].sort((a, b) => a - b).map((r) => `<option value="${r}" ${r === Math.min(1080, short) ? 'selected' : ''}>${r === short ? `Full size (${V.p.width}×${V.p.height})` : `${r}p`}</option>`).join('')}</select></div>
     <p class="muted">Format: ${mime ? (mime.includes('mp4') ? 'MP4' : 'WebM') : 'not supported in this browser'}</p>
     <div class="row end"><button class="btn ghost" id="exCancel">Cancel</button><button class="btn primary" id="exGo" ${mime ? '' : 'disabled'}>Export</button></div>
   </div>`;
