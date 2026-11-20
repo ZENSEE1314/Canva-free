@@ -1,5 +1,6 @@
 // AI image generation via Muapi.ai (https://muapi.ai), using the user's own API key.
 // On the Artvas server (e.g. Railway) requests go through a small same-origin relay; otherwise directly to the API.
+import { needsSite, inPreview } from './env.js';
 
 export const AI_MODELS = [
   { id: 'free-flux', name: 'Free AI — no key needed', free: true, fmodel: 'flux', ar: null },
@@ -115,7 +116,7 @@ async function generateFree({ model, prompt, aspectRatio, onStatus }) {
     try {
       r = await fetch(url, viaRelay ? {} : { referrerPolicy: 'no-referrer' });
     } catch {
-      throw new Error("Couldn't reach the free AI service. Free AI images work on your own Artvas site (for example on Railway).");
+      throw new Error(needsSite('Free AI images', "Couldn't reach the free AI service. It may be busy — try again in a minute."));
     }
     if ([402, 403, 429, 502, 503].includes(r.status)) {
       lastFree = Date.now();
@@ -149,7 +150,7 @@ export async function generateImage({ model, prompt, aspectRatio, onStatus, extr
   try {
     first = await fetch(submitUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': key }, body: JSON.stringify(body) });
   } catch {
-    throw new Error("Couldn't reach Muapi.ai from this page. AI images work on your own Artvas site (for example on Railway), or check your internet connection.");
+    throw new Error(needsSite('AI generation', "Couldn't reach Muapi.ai. Check your internet connection and try again."));
   }
   const sub = await check(first);
   const id = sub.request_id || sub.id;

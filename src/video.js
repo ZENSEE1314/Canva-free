@@ -13,6 +13,7 @@ import { MUSIC_STYLES, SFX, renderMusic, renderSfx } from './music.js';
 import { VOICES, speak, ONLINE_LANGS, speakOnline, faceFor } from './tts.js';
 import { fontsIn } from './fonts.js';
 import { VIDEO_FX, BODY_FX, FX_CATS, COLOR_FX, fxName, applyVideoFx, applyBodyFx, segmentCanvas, loadSegmenter, segState, fxThumb, loadFxSamples, fxSamplesReady, drawSample, drawFxFrame, bindCardPreview } from './vfx.js';
+import { needsSite, inPreview as IN_PREVIEW } from './env.js';
 
 export const VIDEO_PRESETS = [
   { id: 'tiktok', name: 'TikTok', w: 1080, h: 1920, color: '#111111', hint: '9:16 · up to 10 min' },
@@ -802,7 +803,7 @@ function applyEffectLayers(g, W, Hh, t, preview) {
         g.fillStyle = 'rgba(0,0,0,.55)';
         const m = Math.min(W, Hh);
         g.font = `600 ${Math.round(m * 0.035)}px "DM Sans", sans-serif`;
-        const msg = st === 'error' ? 'Body effects need internet the first time (your Artvas site)' : 'Loading body effects…';
+        const msg = st === 'error' ? (IN_PREVIEW ? 'Body effects work on your own Artvas site, not in this preview' : "Body effects couldn't load — check your internet") : 'Loading body effects…';
         const tw = g.measureText(msg).width;
         g.fillRect((W - tw) / 2 - m * 0.03, Hh * 0.06, tw + m * 0.06, m * 0.07);
         g.fillStyle = '#fff';
@@ -2453,13 +2454,13 @@ function warmSegmenter() {
     })
     .catch(() => {
       if (!V) return;
-      H.toast("Couldn't load body effects. They need an internet connection the first time (works on your own Artvas site).");
+      H.toast(needsSite('Body effects', "Couldn't load body effects. Check your internet connection and try again."));
       if (V.tab === 'effects') renderPanel();
     });
 }
 function segStatusText() {
   const st = segState();
-  return st === 'ready' ? 'Person detection is ready.' : st === 'loading' ? 'Loading person detection (about 3 MB, once)…' : st === 'error' ? "Person detection couldn't load. It needs internet the first time (works on your own Artvas site)." : 'Finds the person in your video automatically. Runs on your device.';
+  return st === 'ready' ? 'Person detection is ready.' : st === 'loading' ? 'Loading person detection (about 3 MB, once)…' : st === 'error' ? (IN_PREVIEW ? needsSite('Person detection', '') : "Person detection couldn't load. Check your internet connection and try again.") : 'Finds the person in your video automatically. Runs on your device.';
 }
 function renderEffectsPanel(p) {
   const sec = V.fxSec || 'video';

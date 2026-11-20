@@ -1,5 +1,6 @@
 // Auto captions: speech-to-text that runs in the browser with Whisper (transformers.js).
 // The library loads from a CDN on first use; the model (~40 MB) is downloaded once and cached.
+import { needsSite, inPreview } from './env.js';
 const TRANSFORMERS_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.6';
 const MODELS = { fast: 'Xenova/whisper-tiny', accurate: 'Xenova/whisper-base' };
 const cache = {};
@@ -109,7 +110,7 @@ export async function transcribeMedia(blob, { inSec = 0, outSec, quality = 'fast
   try {
     asr = await getASR(quality, onStatus);
   } catch {
-    throw new Error("Couldn't load the speech model. Auto captions need an internet connection the first time (works on your own Artvas site).");
+    throw new Error(needsSite('Auto captions', "Couldn't load the speech model. Check your internet connection and try again (it downloads once, the first time)."));
   }
   let lang = language;
   if (!lang) {

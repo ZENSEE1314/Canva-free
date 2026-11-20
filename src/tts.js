@@ -1,5 +1,6 @@
 // Text to speech with Kokoro-82M (Apache-2.0), running 100% in the browser via kokoro-js.
 // The library loads from a CDN on first use; the voice model (~90 MB) is downloaded once and cached.
+import { needsSite, inPreview } from './env.js';
 const KOKORO_URL = 'https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/dist/kokoro.web.js';
 const MODEL_ID = 'onnx-community/Kokoro-82M-v1.0-ONNX';
 
@@ -123,7 +124,7 @@ export async function speak(text, { voice = 'af_heart', speed = 1, onStatus } = 
     tts = await getTTS(onStatus);
   } catch (e) {
     console.error(e);
-    throw new Error("Couldn't load the voice model. Voices need an internet connection the first time (works on your own Artvas site).");
+    throw new Error(needsSite('This voice', "Couldn't load the voice model. Check your internet connection and try again (it downloads once, the first time)."));
   }
   const pieces = [];
   const segments = [];
@@ -182,10 +183,10 @@ export async function speakOnline(text, { voice, speed = 1, onStatus } = {}) {
   try {
     r = await fetch('api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, voice, rate: speed }) });
   } catch {
-    throw new Error('Online voices need the Artvas server (your Railway site). Pick an "On this device" English voice here instead.');
+    throw new Error(needsSite('Voices', "Couldn't reach the Artvas server. Check your internet connection and try again."));
   }
   const type = r.headers.get('content-type') || '';
-  if (!type.includes('json')) throw new Error('Online voices need the Artvas server (your Railway site). Pick an "On this device" English voice here instead.');
+  if (!type.includes('json')) throw new Error(needsSite('Voices', 'Online voices need the Artvas server. Open Artvas from your Railway link (not a plain static copy).'));
   const data = await r.json();
   if (!r.ok) throw new Error(data.error || 'The voice service failed. Try again.');
   const bytes = Uint8Array.from(atob(data.audio), (c) => c.charCodeAt(0));
