@@ -10,7 +10,7 @@ import { getKey, AI_MODELS, AI_STYLES, VIDEO_MODELS, closestRatio, generateImage
 import { VIDEO_TEMPLATES, TEMPLATE_CATS as VT_CATS, buildFromTemplate, templateDuration } from './videotemplates.js';
 import { transcribeMedia, scriptToLines } from './captions.js';
 import { MUSIC_STYLES, SFX, renderMusic, renderSfx } from './music.js';
-import { VOICES, speak, ONLINE_LANGS, speakOnline } from './tts.js';
+import { VOICES, speak, ONLINE_LANGS, speakOnline, faceFor } from './tts.js';
 import { fontsIn } from './fonts.js';
 import { VIDEO_FX, BODY_FX, FX_CATS, COLOR_FX, fxName, applyVideoFx, applyBodyFx, segmentCanvas, loadSegmenter, segState, fxThumb, loadFxSamples, fxSamplesReady, drawSample, drawFxFrame, bindCardPreview } from './vfx.js';
 
@@ -259,6 +259,7 @@ async function importFile(file) {
 }
 
 async function importFiles(files, { add = true } = {}) {
+  const wasEmpty = !V.p.clips.length;
   for (const f of files) {
     H.toast(`Importing ${f.name}…`);
     const m = await importFile(f);
@@ -266,6 +267,7 @@ async function importFiles(files, { add = true } = {}) {
     if (m.type === 'audio') addAudio(m.id, m.duration);
     else addClip(m.id, m.type, m.duration);
   }
+  if (wasEmpty && V.p.clips.length) fitTimeline();
   renderPanel();
   commit();
   // phones: show the timeline with the new clips instead of leaving the sheet over it
@@ -1672,7 +1674,8 @@ const zToPps = (z) => PPS_MIN * Math.pow(PPS_MAX / PPS_MIN, z / 100);
 function fitTimeline() {
   const sc = $('#tlScroll');
   if (!sc) return;
-  const w = sc.clientWidth - 40;
+  // the timeline can be hidden (phones, while a sheet is open): use the window width then
+  const w = (sc.clientWidth || window.innerWidth) - 40;
   V.pps = clamp(w / Math.max(1, totalDur() + 0.5), PPS_MIN, 200);
   syncZoomUI();
 }
@@ -2204,7 +2207,9 @@ function renderAudioPanel(p) {
     body.innerHTML = `<p class="muted">Natural AI voices, free. Pick a language, then a voice.</p>
       <div class="field"><label>Language</label><select id="ttsLang">${ONLINE_LANGS.map((l) => `<option value="${l.id}" ${l.id === a.lang ? 'selected' : ''}>${H.esc(l.label)}</option>`).join('')}</select></div>
       <textarea class="search ai-prompt" id="ttsText" rows="5" placeholder="${{ 'zh-CN': '输入要朗读的文字…', 'zh-TW': '輸入要朗讀的文字…', 'zh-HK': '輸入要讀出嘅文字…', ms: 'Taip apa yang perlu dibaca…', id: 'Ketik teks yang ingin dibacakan…' }[a.lang] || 'Type what the voice should say…'}">${H.esc(a.ttsText)}</textarea>
-      <div class="field mt"><label>Voice</label><select id="ttsVoice">
+      <div class="field mt"><label>Voice</label>
+        <div class="voice-grid">${[...lang.voices.map((x) => ({ ...x, online: true })), ...(a.lang === 'en' ? VOICES : [])].map((x) => `<button type="button" class="voice-card ${x.id === a.voice ? 'on' : ''}" data-voice="${x.id}" title="${H.esc(x.name)}${x.online ? '' : ' (on this device)'}"><img src="${faceFor(x)}" alt="" loading="lazy"><b>${H.esc(x.name)}</b><small>${H.esc(x.online ? x.desc.split(' · ').filter((d) => !/^(female|male)$/.test(d)).join(' · ') || x.desc : `${x.accent} · ${x.desc}`)}</small>${x.online ? '' : '<i class="vc-dev" title="Runs on this device">device</i>'}</button>`).join('')}</div>
+        <select id="ttsVoice" class="file-hide" tabindex="-1" aria-hidden="true">
         <optgroup label="Online · fast">${lang.voices.map((x) => `<option value="${x.id}" ${x.id === a.voice ? 'selected' : ''}>${H.esc(x.name)} — ${H.esc(x.desc)}</option>`).join('')}</optgroup>
         ${a.lang === 'en' ? `<optgroup label="On this device · private (90 MB download once)">${VOICES.map((x) => `<option value="${x.id}" ${x.id === a.voice ? 'selected' : ''}>${x.name} — ${x.accent} · ${x.desc}</option>`).join('')}</optgroup>` : ''}
       </select></div>
@@ -2216,7 +2221,8 @@ function renderAudioPanel(p) {
       ${V.sel?.kind === 'overlay' && findSel()?.type === 'text' ? `<button class="btn ghost small" id="ttsFromText">Use the selected text</button>` : ''}`;
     $('#ttsLang', body).onchange = (e) => { a.lang = e.target.value; a.voice = ''; renderAudioPanel(p); };
     $('#ttsText', body).oninput = (e) => (a.ttsText = e.target.value);
-    $('#ttsVoice', body).onchange = (e) => (a.voice = e.target.value);
+    $('#ttsVoice', body).onchange = (e) => { a.voice = e.target.value; $$('.voice-card', body).forEach((c) => c.classList.toggle('on', c.dataset.voice === a.voice)); };
+    $$('.voice-card', body).forEach((c) => (c.onclick = () => { a.voice = c.dataset.voice; $('#ttsVoice', body).value = a.voice; $$('.voice-card', body).forEach((x) => x.classList.toggle('on', x === c)); }));
     $('#ttsSpeed', body).oninput = (e) => { a.speed = +e.target.value; e.target.previousElementSibling.querySelector('b').textContent = a.speed.toFixed(2) + '×'; };
     $('#ttsCap', body).onchange = (e) => (a.ttsCaptions = e.target.checked);
     const fromText = $('#ttsFromText', body);
@@ -2465,8 +2471,8 @@ function renderEffectsPanel(p) {
     ${sec === 'video'
       ? `<div class="chips mt">${FX_CATS.map((c) => `<button class="chip ${c === cat ? 'on' : ''}" data-fcat="${c}">${c}</button>`).join('')}</div>`
       : `<p class="muted mt" id="segStatus">${segStatusText()}</p>`}
-    ${sel ? `<p class="fx-hint">Tap an effect to replace <b>${H.esc(fxName(sel.fx))}</b>. <button class="linkish" id="fxNew">Add a new layer instead</button></p>` : `<p class="muted">Tap an effect to add it at the playhead. It applies to everything under it on the timeline.</p>`}
-    <p class="muted small-note">${H.isMobile() ? 'Press and hold a preview to see it move.' : 'Point at a preview to see it move.'}</p>
+    ${sel ? `<p class="fx-hint">Tap an effect to replace <b>${H.esc(fxName(sel.fx))}</b>. <button class="linkish" id="fxNew">Add a new layer instead</button></p>` : `<p class="muted fx-tip">Tap an effect to add it at the playhead. It applies to everything under it on the timeline.</p>`}
+    <p class="muted small-note fx-tip">${H.isMobile() ? 'Press and hold a preview to see it move.' : 'Point at a preview to see it move.'}</p>
     <div class="fx-grid">${list.map((f) => `<button class="fx-card ${sel?.fx === f.id ? 'on' : ''}" data-fx-add="${f.id}" title="${H.esc(f.name)}"><span class="fx-pic"><img src="${fxThumb(f.id, sec)}" alt=""></span><span>${H.esc(f.name)}</span></button>`).join('')}</div>`;
   if (!fxSamplesReady()) loadFxSamples().then(() => V && V.tab === 'effects' && renderEffectsPanel(p)).catch(() => {});
   $$('[data-fsec]', p).forEach((b) => (b.onclick = () => { V.fxSec = b.dataset.fsec; if (V.fxSec === 'body') warmSegmenter(); renderEffectsPanel(p); }));
@@ -2576,8 +2582,8 @@ function renderTransitionsPanel(p) {
     <div class="tr-nav"><button class="icon-btn" id="trPrev" ${i <= 1 ? 'disabled' : ''} title="Previous cut">${H.icon('chevLeft')}</button>
       <div><b>Cut ${i} of ${n - 1}</b><small class="muted">Clip ${i} → clip ${i + 1} · at ${fmt(starts[i])}</small></div>
       <button class="icon-btn" id="trNext" ${i >= n - 1 ? 'disabled' : ''} title="Next cut">${H.icon('chevRight')}</button></div>
-    <p class="muted">Tap a transition to use it at this cut. You can also tap the ＋ between clips on the timeline.</p>
-    <p class="muted small-note">${H.isMobile() ? 'Press and hold a preview to see it play.' : 'Point at a preview to see it play.'}</p>
+    <p class="muted fx-tip">Tap a transition to use it at this cut. You can also tap the ＋ between clips on the timeline.</p>
+    <p class="muted small-note fx-tip">${H.isMobile() ? 'Press and hold a preview to see it play.' : 'Point at a preview to see it play.'}</p>
     <div class="fx-grid">${TRANSITIONS.map(([id, l]) => `<button class="fx-card ${cur === id ? 'on' : ''}" data-tr-set="${id}"><span class="fx-pic"><img src="${transThumb(id)}" alt=""></span><span>${l}</span></button>`).join('')}</div>
     <div class="field mt"><label>Length <b>${dur.toFixed(1)}s</b></label><input type="range" id="trDur" min="0.2" max="2" step="0.1" value="${dur}"></div>
     <div class="row wrap"><button class="btn ghost small" id="trAll">Use at every cut</button><button class="btn ghost small" id="trRandom">Mix it up (random)</button><button class="btn ghost small" id="trNone">Remove all</button></div>`;

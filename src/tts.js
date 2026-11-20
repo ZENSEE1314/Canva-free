@@ -155,8 +155,8 @@ export async function speak(text, { voice = 'af_heart', speed = 1, onStatus } = 
 // Served by the Artvas server (free Microsoft Edge neural voices). Fast: no model download.
 const v = (id, name, desc) => ({ id, name, desc });
 export const ONLINE_LANGS = [
-  { id: 'en', label: 'English', voices: [v('en-US-AvaNeural', 'Ava', 'US · female · friendly'), v('en-US-AndrewNeural', 'Andrew', 'US · male · warm'), v('en-US-EmmaNeural', 'Emma', 'US · female · cheerful'), v('en-US-BrianNeural', 'Brian', 'US · male · casual'), v('en-US-AriaNeural', 'Aria', 'US · female · confident'), v('en-US-GuyNeural', 'Guy', 'US · male · narrator'), v('en-GB-SoniaNeural', 'Sonia', 'UK · female'), v('en-GB-RyanNeural', 'Ryan', 'UK · male'), v('en-AU-NatashaNeural', 'Natasha', 'Australia · female'), v('en-AU-WilliamNeural', 'William', 'Australia · male'), v('en-SG-LunaNeural', 'Luna', 'Singapore · female'), v('en-SG-WayneNeural', 'Wayne', 'Singapore · male'), v('en-IN-NeerjaNeural', 'Neerja', 'India · female'), v('en-IN-PrabhatNeural', 'Prabhat', 'India · male')] },
-  { id: 'zh-CN', label: '中文 普通话 · Mandarin', voices: [v('zh-CN-XiaoxiaoNeural', '晓晓 Xiaoxiao', 'female · warm'), v('zh-CN-XiaoyiNeural', '晓伊 Xiaoyi', 'female · lively'), v('zh-CN-YunxiNeural', '云希 Yunxi', 'male · sunny'), v('zh-CN-YunjianNeural', '云健 Yunjian', 'male · energetic'), v('zh-CN-YunyangNeural', '云扬 Yunyang', 'male · news'), v('zh-CN-YunxiaNeural', '云夏 Yunxia', 'boy'), v('zh-CN-liaoning-XiaobeiNeural', '晓北 Xiaobei', 'female · 东北话'), v('zh-CN-shaanxi-XiaoniNeural', '晓妮 Xiaoni', 'female · 陕西话')] },
+  { id: 'en', label: 'English', voices: [v('en-US-AvaNeural', 'Ava', 'US · female · friendly'), v('en-US-AndrewNeural', 'Andrew', 'US · male · warm'), v('en-US-EmmaNeural', 'Emma', 'US · female · cheerful'), v('en-US-BrianNeural', 'Brian', 'US · male · casual'), v('en-US-AriaNeural', 'Aria', 'US · female · confident'), v('en-US-GuyNeural', 'Guy', 'US · male · narrator'), v('en-GB-SoniaNeural', 'Sonia', 'UK · female'), v('en-GB-RyanNeural', 'Ryan', 'UK · male'), v('en-AU-NatashaNeural', 'Natasha', 'Australia · female'), v('en-AU-WilliamNeural', 'William', 'Australia · male'), v('en-SG-LunaNeural', 'Luna', 'Singapore · female'), v('en-SG-WayneNeural', 'Wayne', 'Singapore · male'), v('en-IN-NeerjaNeural', 'Neerja', 'India · female'), v('en-IN-PrabhatNeural', 'Prabhat', 'India · male'), v('en-US-AnaNeural', 'Ana', 'US · girl · child')] },
+  { id: 'zh-CN', label: '中文 普通话 · Mandarin', voices: [v('zh-CN-XiaoxiaoNeural', '晓晓 Xiaoxiao', 'female · warm'), v('zh-CN-XiaoyiNeural', '晓伊 Xiaoyi', 'female · lively'), v('zh-CN-YunxiNeural', '云希 Yunxi', 'male · sunny'), v('zh-CN-YunjianNeural', '云健 Yunjian', 'male · energetic'), v('zh-CN-YunyangNeural', '云扬 Yunyang', 'male · news'), v('zh-CN-YunxiaNeural', '云夏 Yunxia', 'boy · child'), v('zh-CN-liaoning-XiaobeiNeural', '晓北 Xiaobei', 'female · 东北话'), v('zh-CN-shaanxi-XiaoniNeural', '晓妮 Xiaoni', 'female · 陕西话')] },
   { id: 'zh-TW', label: '中文 台灣 · Taiwan Mandarin', voices: [v('zh-TW-HsiaoChenNeural', '曉臻 HsiaoChen', 'female'), v('zh-TW-HsiaoYuNeural', '曉雨 HsiaoYu', 'female'), v('zh-TW-YunJheNeural', '雲哲 YunJhe', 'male')] },
   { id: 'zh-HK', label: '粵語 · Cantonese', voices: [v('zh-HK-HiuGaaiNeural', '曉佳 HiuGaai', 'female'), v('zh-HK-HiuMaanNeural', '曉曼 HiuMaan', 'female'), v('zh-HK-WanLungNeural', '雲龍 WanLung', 'male')] },
   { id: 'ms', label: 'Bahasa Melayu · Malay', voices: [v('ms-MY-YasminNeural', 'Yasmin', 'female'), v('ms-MY-OsmanNeural', 'Osman', 'male')] },
@@ -203,4 +203,33 @@ export async function speakOnline(text, { voice, speed = 1, onStatus } = {}) {
   let segments = (data.sentences || []).filter((x) => x.text);
   if (!segments.length) segments = [{ text, start: 0, end: duration }];
   return { blob, duration, segments };
+}
+
+/**
+ * A face for a voice, matching its gender, age and where the language is spoken.
+ * The faces are original portraits made with the free image AI for Artvas (not real people).
+ */
+export function faceFor(voice) {
+  const id = voice.id || '';
+  const desc = `${voice.desc || ''} ${voice.gender || ''}`.toLowerCase();
+  const female = /\bfemale\b|\bgirl\b/.test(desc) || /^[ab]f_/.test(id);
+  let key;
+  if (/\bboy\b/.test(desc)) key = 'child-boy';
+  else if (/\bgirl\b|\bchild\b/.test(desc)) key = female ? 'child-girl' : 'child-boy';
+  else if (!female && /narrator|documentary|deep|storyteller|jolly/.test(desc)) key = 'senior-m';
+  else {
+    const region = /^(zh|ja|ko|en-SG)-/.test(id)
+      ? 'ea'
+      : /^(ms|id|fil|th|vi)-/.test(id)
+        ? 'sea'
+        : /^(ta|hi|en-IN)-/.test(id)
+          ? 'sa'
+          : /^(es-MX|pt-BR)-/.test(id)
+            ? 'lat'
+            : /^ar-/.test(id)
+              ? 'me'
+              : 'w';
+    key = `${region}-${female ? 'f' : 'm'}`;
+  }
+  return new URL(`faces/${key}.jpg`, document.baseURI).href;
 }
