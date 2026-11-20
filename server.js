@@ -2,6 +2,8 @@ import express from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(__dirname, 'dist');
@@ -71,6 +73,57 @@ app.get('/api/free-image', async (req, res) => {
     }
   }
   res.status(last === 429 || last === 402 ? 429 : 502).json({ error: 'The free AI service is busy' });
+});
+
+// ---- Online voices (Microsoft Edge "Read Aloud" neural voices, free) ----
+// Chinese, Malay, Tamil, Indonesian, English and many more. Returns MP3 audio plus sentence timings.
+const ttsAgent = process.env.HTTPS_PROXY ? new HttpsProxyAgent(process.env.HTTPS_PROXY) : undefined;
+const xml = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+app.post('/api/tts', express.json({ limit: '64kb' }), async (req, res) => {
+  const text = String(req.body?.text || '').trim().slice(0, 5000);
+  const voice = String(req.body?.voice || '');
+  const rate = Math.max(0.5, Math.min(2, Number(req.body?.rate) || 1));
+  if (!text) return res.status(400).json({ error: 'Nothing to say' });
+  if (!/^[a-z]{2,3}-[A-Z]{2}(-[a-z]+)?-[A-Za-z]+Neural$/.test(voice)) return res.status(400).json({ error: 'Unknown voice' });
+  const tts = new MsEdgeTTS({ agent: ttsAgent, connectionTimeoutMs: 10000, synthesisTimeoutMs: 45000 });
+  try {
+    await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3, { sentenceBoundaryEnabled: true });
+    const pct = Math.round((rate - 1) * 100);
+    const { audioStream, metadataStream } = tts.toStream(xml(text), { rate: `${pct >= 0 ? '+' : ''}${pct}%` });
+    const audio = [];
+    const sentences = [];
+    const collect = (stream, onData) =>
+      stream
+        ? new Promise((resolve, reject) => {
+            stream.on('data', onData);
+            stream.on('end', resolve);
+            stream.on('close', resolve);
+            stream.on('error', reject);
+          })
+        : Promise.resolve();
+    await Promise.all([
+      collect(audioStream, (c) => audio.push(c)),
+      collect(metadataStream, (c) => {
+        try {
+          for (const m of JSON.parse(c.toString()).Metadata || []) {
+            if (m.Type !== 'SentenceBoundary') continue;
+            const start = m.Data.Offset / 1e7;
+            sentences.push({ text: m.Data.text?.Text || '', start, end: start + m.Data.Duration / 1e7 });
+          }
+        } catch {}
+      }),
+    ]);
+    const buf = Buffer.concat(audio);
+    if (!buf.length) throw new Error('empty');
+    res.json({ mime: 'audio/mpeg', audio: buf.toString('base64'), sentences });
+  } catch (e) {
+    console.error('TTS failed', e?.message || e);
+    res.status(502).json({ error: 'The voice service is busy. Try again in a moment.' });
+  } finally {
+    try {
+      tts.close();
+    } catch {}
+  }
 });
 
 // Fetch a generated image so the editor can use it without cross-origin problems.

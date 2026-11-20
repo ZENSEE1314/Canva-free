@@ -2,10 +2,32 @@
 const DB_NAME = 'artvas';
 let dbPromise;
 
+export const storageStatus = { blocked: false };
+
 function openDB() {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, 3);
+      let settled = false;
+      // If another (older) Artvas tab keeps the database open, the open request can wait forever.
+      // Give up after a few seconds so the app still starts, and tell the user what to do.
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        storageStatus.blocked = true;
+        // keep the rejected promise so later calls fail fast; reloading the page tries again
+        reject(new Error('Storage is busy in another Artvas tab'));
+      }, 5000);
+      let req;
+      try {
+        req = indexedDB.open(DB_NAME, 3);
+      } catch (e) {
+        clearTimeout(timer);
+        dbPromise = null;
+        return reject(e);
+      }
+      req.onblocked = () => {
+        storageStatus.blocked = true;
+      };
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains('designs')) db.createObjectStore('designs', { keyPath: 'id' });
@@ -16,8 +38,26 @@ function openDB() {
         if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
         if (!db.objectStoreNames.contains('media')) db.createObjectStore('media', { keyPath: 'id' });
       };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const db = req.result;
+        // let future versions of Artvas upgrade the database without getting stuck
+        db.onversionchange = () => {
+          db.close();
+          dbPromise = null;
+        };
+        if (settled) return db.close();
+        settled = true;
+        clearTimeout(timer);
+        storageStatus.blocked = false;
+        resolve(db);
+      };
+      req.onerror = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        dbPromise = null;
+        reject(req.error);
+      };
     });
   }
   return dbPromise;

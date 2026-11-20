@@ -83,6 +83,13 @@ export function scriptToLines(text) {
     .filter(Boolean);
   const out = [];
   for (const p of parts) {
+    // Chinese/Japanese/Thai have no spaces: split long lines at commas, then every ~14 characters
+    if (!/\s/.test(p) && p.length > 16) {
+      for (const piece of p.split(/(?<=[，、,；;：:])/)) {
+        for (let i = 0; i < piece.length; i += 14) out.push(piece.slice(i, i + 14));
+      }
+      continue;
+    }
     const words = p.split(/\s+/);
     if (words.length <= 9) out.push(p);
     else for (let i = 0; i < words.length; i += 7) out.push(words.slice(i, i + 7).join(' '));

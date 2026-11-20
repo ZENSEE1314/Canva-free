@@ -588,3 +588,11 @@ kbd { background: #f1f0f5; border: 1px solid var(--line); border-bottom-width: 2
 .sfx-add:hover { background: var(--brand); color: #fff; }
 
 [hidden] { display: none !important; }
+
+/* storage busy banner + boot screen */
+.storage-banner { position: fixed; left: 50%; top: 12px; transform: translateX(-50%); z-index: 400; background: #1c1630; color: #fff; border-radius: 12px; padding: 12px 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; max-width: min(640px, calc(100% - 24px)); font-size: 13px; box-shadow: 0 10px 30px rgba(0,0,0,.3); }
+.storage-banner .btn { margin-left: auto; }
+
+.v-controls { overflow-x: auto; scrollbar-width: none; }
+.v-controls::-webkit-scrollbar { display: none; }
+.v-controls > * { flex-shrink: 0; }

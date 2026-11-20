@@ -4,7 +4,7 @@ import {
   Circle, Rect, filters, cache, util, InteractiveFabricObject,
 } from 'fabric';
 import { jsPDF } from 'jspdf';
-import { saveDesign, getDesign, listDesigns, deleteDesign, uid, listVersions, saveVersion, getVersion, deleteVersion, kvGet, kvSet } from './storage.js';
+import { storageStatus, saveDesign, getDesign, listDesigns, deleteDesign, uid, listVersions, saveVersion, getVersion, deleteVersion, kvGet, kvSet } from './storage.js';
 import {
   SIZE_PRESETS, FONTS, PALETTE, GRADIENTS, TEXT_PRESETS, TEXT_COMBOS, SHAPES, STICKERS, TEMPLATES, TEMPLATE_CATS, FORMATS, formatsFor,
 } from './data.js';
@@ -19,6 +19,7 @@ import { AI_MODELS, AI_STYLES, closestRatio, getKey, setKey, generateImage, toDa
 import { openVideoEditor, closeVideoEditor, newVideoProject, VIDEO_PRESETS, SCREEN_SIZES, VIDEO_STARTERS, applyStarter, _videoDebug } from './video.js';
 import { VIDEO_TEMPLATES, TEMPLATE_CATS as VT_CATS, buildFromTemplate, templateDuration } from './videotemplates.js';
 import { icon } from './icons.js';
+import { fontsIn, fontsInFully, coreFonts, loadFamily } from './fonts.js';
 
 const PROPS = [
   'name', 'locked', 'selectable', 'evented', 'hasControls', 'lockMovementX', 'lockMovementY',
@@ -71,15 +72,30 @@ function toast(msg) {
 }
 
 // ---------- Fonts ----------
-const fontsReady = Promise.all(
-  FONTS.flatMap((f) => ['400', '700', '800', '900', 'italic 400', 'italic 700'].map((w) => document.fonts.load(`${w} 40px "${f}"`)))
-).catch(() => {});
+// Only the interface fonts load up front; design fonts load when a design or template needs them.
+const fontsReady = coreFonts;
 
 async function ensureFont(family, weight = '400', style = 'normal') {
   try {
-    await document.fonts.load(`${style} ${weight} 40px "${family}"`);
+    await Promise.race([document.fonts.load(`${style} ${weight} 40px "${family}"`), new Promise((r) => setTimeout(r, 3000))]);
     cache.clearFontCache(family);
   } catch {}
+}
+
+/** Re-measure all text once late fonts arrive (slow connections). */
+function refreshTextWhenFontsLoad(obj) {
+  fontsInFully(obj).then(() => {
+    const c = state.canvas;
+    if (!c) return;
+    cache.clearFontCache();
+    c.getObjects().forEach((o) => {
+      if (o.initDimensions) {
+        o.initDimensions();
+        o.setCoords();
+      }
+    });
+    c.requestRenderAll();
+  });
 }
 
 // =====================================================
@@ -248,8 +264,8 @@ async function renderHome() {
       renderHome();
     })
   );
+  if (storageStatus.blocked) showStorageBanner();
   // template thumbnails (rendered when scrolled into view)
-  await fontsReady;
   lazyThumbs($$('[data-tplthumb]'), (img) => {
     const t = TEMPLATES[+img.dataset.tplthumb];
     const f = FORMATS[t.fmt] || FORMATS.ig;
@@ -384,7 +400,7 @@ function pickVideoStarter(preset) {
 }
 /** Render one page of a design to a PNG blob (used to turn designs into video slides). */
 async function designPageToBlob(d, i) {
-  await fontsReady;
+  await fontsIn(d.pages[i]?.json);
   const el = document.createElement('canvas');
   const sc = new StaticCanvas(el, { width: d.width, height: d.height, enableRetinaScaling: false, renderOnAddRemove: false });
   if (d.pages[i]?.json) await sc.loadFromJSON(d.pages[i].json);
@@ -449,8 +465,9 @@ async function openEditor(design) {
   });
   ro.observe($('#stage'));
 
-  await fontsReady;
+  await fontsIn(design.pages);
   await loadPage(0);
+  refreshTextWhenFontsLoad(design.pages);
   if (state.tab === 'ai') $$('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === 'ai'));
   fitZoom();
   renderTab();
@@ -1089,6 +1106,7 @@ async function persist() {
 async function loadPage(i) {
   const c = state.canvas;
   state.page = i;
+  await fontsIn(state.design.pages[i]?.json);
   state.loading = true;
   c.discardActiveObject();
   c.clear();
@@ -1355,7 +1373,7 @@ async function applyTemplate(i) {
   const { width: W, height: H } = state.design;
   const hasContent = c.getObjects().length > 0;
   if (hasContent && !(await askConfirm('Replace the current page with this template?', { ok: 'Replace' }))) return;
-  await fontsReady;
+  await fontsIn(tpl.items);
   state.loading = true;
   c.clear();
   c.backgroundImage = null;
@@ -1389,6 +1407,7 @@ const thumbCache = new Map();
 async function templateThumb(i, W, H, size) {
   const key = `${i}:${W}x${H}:${size}`;
   if (thumbCache.has(key)) return thumbCache.get(key);
+  await fontsIn(TEMPLATES[i].items, 2500);
   const k = Math.min(1, size / Math.max(W, H)) * 1.5;
   const el = document.createElement('canvas');
   const sc = new StaticCanvas(el, { width: Math.round(W * k), height: Math.round(H * k), enableRetinaScaling: false, renderOnAddRemove: false });
@@ -3517,6 +3536,16 @@ function setPropsOpen(open) {
 // =====================================================
 // ROUTING
 // =====================================================
+function showStorageBanner() {
+  if (document.getElementById('storageBanner')) return;
+  const b = document.createElement('div');
+  b.id = 'storageBanner';
+  b.className = 'storage-banner';
+  b.innerHTML = `<b>Artvas is open in another tab or window.</b> Your saved designs can't load until the other Artvas tabs (including any older preview) are closed. <button class="btn primary small" id="sbReload">Reload</button>`;
+  document.body.appendChild(b);
+  b.querySelector('#sbReload').onclick = () => location.reload();
+}
+
 async function boot() {
   await loadBrand();
   await loadMyTemplates();

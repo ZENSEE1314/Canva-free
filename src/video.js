@@ -10,7 +10,8 @@ import { getKey, AI_MODELS, AI_STYLES, VIDEO_MODELS, closestRatio, generateImage
 import { VIDEO_TEMPLATES, TEMPLATE_CATS as VT_CATS, buildFromTemplate, templateDuration } from './videotemplates.js';
 import { transcribeMedia, scriptToLines } from './captions.js';
 import { MUSIC_STYLES, SFX, renderMusic, renderSfx } from './music.js';
-import { VOICES, speak } from './tts.js';
+import { VOICES, speak, ONLINE_LANGS, speakOnline } from './tts.js';
+import { fontsIn } from './fonts.js';
 
 export const VIDEO_PRESETS = [
   { id: 'tiktok', name: 'TikTok', w: 1080, h: 1920, color: '#111111', hint: '9:16 · up to 10 min' },
@@ -981,6 +982,7 @@ function addAudio(mediaId, duration, start = 0) {
 }
 function addOverlay(o) {
   const ov = { id: uid(), start: V.t >= totalDur() - 0.1 && V.p.clips.length ? 0 : V.t, dur: 3, x: 0.5, y: 0.5, opacity: 1, animIn: 'fade', animOut: 'fade', ...o };
+  if (ov.font) fontsIn([ov]);
   V.p.overlays.push(ov);
   select({ kind: 'overlay', id: ov.id });
   commit();
@@ -1127,7 +1129,10 @@ function select(sel, { open = false } = {}) {
   V.sel = sel;
   renderInspector();
   renderTimeline();
-  if (sel && open && H.isMobile()) openInspector();
+  if (H.isMobile()) {
+    if (sel && open) openInspector();
+  } else if (sel && !V.inspClosedByUser && !V.inspectorOpen) openInspector();
+  else if (!sel && V.inspectorOpen && !V.inspPinned) { V.inspectorOpen = false; syncPanels(); }
 }
 
 // ---------- history & saving ----------
@@ -1220,6 +1225,7 @@ export async function openVideoEditor(project, helpers, opts = {}) {
     pps: 60, hist: [], redo: [], tab: opts.tab || (project.clips.some((c) => c.slot) ? 'templates' : 'media'), panelOpen: !H.isMobile() || !!opts.tab, inspectorOpen: false, hits: [], last: 0,
   };
   for (const id of project.mediaIds || []) await mediaURL(id).catch(() => {});
+  await fontsIn(project.overlays);
   H.app.innerHTML = editorHTML();
   V.canvas = $('#vCanvas');
   sizeCanvas();
@@ -1326,7 +1332,7 @@ function syncPanels() {
   const ed = $('#editor');
   if (!ed) return;
   ed.classList.toggle('panel-closed', !V.panelOpen);
-  ed.classList.toggle('props-open', H.isMobile() ? V.inspectorOpen : true);
+  ed.classList.toggle('props-open', !!V.inspectorOpen);
   $$('[data-vtab]').forEach((t) => t.classList.toggle('active', V.panelOpen && t.dataset.vtab === V.tab));
   requestAnimationFrame(fitPreview);
 }
@@ -1361,8 +1367,16 @@ function bindUI() {
   $('#vDel').onclick = deleteSel;
   $('#vZoomIn').onclick = () => { V.pps = Math.min(400, V.pps * 1.4); renderTimeline(); };
   $('#vZoomOut').onclick = () => { V.pps = Math.max(8, V.pps / 1.4); renderTimeline(); };
-  $('#vInspToggle').onclick = () => { V.inspectorOpen = !V.inspectorOpen; if (!H.isMobile()) V.inspectorOpen = true; syncPanels(); };
-  $('#vInspClose').onclick = () => { V.inspectorOpen = false; V.sel = null; renderInspector(); renderTimeline(); syncPanels(); };
+  // "Edit" toggles the right panel; with nothing selected it shows the video settings
+  $('#vInspToggle').onclick = () => {
+    V.inspectorOpen = !V.inspectorOpen;
+    V.inspClosedByUser = !V.inspectorOpen;
+    V.inspPinned = V.inspectorOpen && !V.sel;
+    if (H.isMobile() && V.inspectorOpen) V.panelOpen = false;
+    renderInspector();
+    syncPanels();
+  };
+  $('#vInspClose').onclick = () => { V.inspectorOpen = false; V.inspClosedByUser = true; V.inspPinned = false; syncPanels(); };
   $('#vPanelClose').onclick = closePanel;
   $$('[data-vtab]').forEach((t) =>
     (t.onclick = () => {
@@ -1561,7 +1575,7 @@ function bindTimeline(inner) {
         renderInspector();
         $$('.tl-block.sel', inner).forEach((x) => x.classList.remove('sel'));
         b.classList.add('sel');
-        if (H.isMobile()) openInspector();
+        if (H.isMobile() || (!V.inspClosedByUser && !V.inspectorOpen)) openInspector();
       }
       const item = findSel();
       const mode = e.target.classList.contains('h-l') ? 'l' : e.target.classList.contains('h-r') ? 'r' : 'm';
@@ -1750,7 +1764,7 @@ function playBlob(blob, btn) {
 }
 
 function renderAudioPanel(p) {
-  V.au = V.au || { section: 'music', len: 'auto', seeds: {}, voice: 'af_heart', speed: 1, ttsText: '', ttsBusy: false, ttsStatus: '', ttsCaptions: true };
+  V.au = V.au || { section: 'music', len: 'auto', seeds: {}, voice: '', lang: 'en', speed: 1, ttsText: '', ttsBusy: false, ttsStatus: '', ttsCaptions: true };
   const a = V.au;
   const sec = a.section;
   const imported = V.p.mediaIds.map((id) => [id, V.meta.get(id)]).filter(([, m]) => m && m.type === 'audio');
@@ -1815,16 +1829,25 @@ function renderAudioPanel(p) {
       }
     }));
   } else if (sec === 'tts') {
-    const groups = [['US', 'Female'], ['US', 'Male'], ['UK', 'Female'], ['UK', 'Male']];
-    body.innerHTML = `<p class="muted">Natural AI voices that run free in your browser. The first time, the voice model (~90 MB) downloads once. English voices.</p>
-      <textarea class="search ai-prompt" id="ttsText" rows="5" placeholder="Type what the voice should say…">${H.esc(a.ttsText)}</textarea>
-      <div class="field mt"><label>Voice</label><select id="ttsVoice">${groups.map(([acc, g]) => `<optgroup label="${acc === 'US' ? 'American' : 'British'} ${g.toLowerCase()}">${VOICES.filter((v) => v.accent === acc && v.gender === g).map((v) => `<option value="${v.id}" ${v.id === a.voice ? 'selected' : ''}>${v.name} — ${v.desc}</option>`).join('')}</optgroup>`).join('')}</select></div>
+    a.lang = a.lang || 'en';
+    const lang = ONLINE_LANGS.find((l) => l.id === a.lang) || ONLINE_LANGS[0];
+    const isLocal = (id) => VOICES.some((x) => x.id === id);
+    const allowed = [...lang.voices.map((x) => x.id), ...(a.lang === 'en' ? VOICES.map((x) => x.id) : [])];
+    if (!allowed.includes(a.voice)) a.voice = lang.voices[0].id;
+    body.innerHTML = `<p class="muted">Natural AI voices, free. Pick a language, then a voice.</p>
+      <div class="field"><label>Language</label><select id="ttsLang">${ONLINE_LANGS.map((l) => `<option value="${l.id}" ${l.id === a.lang ? 'selected' : ''}>${H.esc(l.label)}</option>`).join('')}</select></div>
+      <textarea class="search ai-prompt" id="ttsText" rows="5" placeholder="${{ 'zh-CN': '输入要朗读的文字…', 'zh-TW': '輸入要朗讀的文字…', 'zh-HK': '輸入要讀出嘅文字…', ms: 'Taip apa yang perlu dibaca…', id: 'Ketik teks yang ingin dibacakan…' }[a.lang] || 'Type what the voice should say…'}">${H.esc(a.ttsText)}</textarea>
+      <div class="field mt"><label>Voice</label><select id="ttsVoice">
+        <optgroup label="Online · fast">${lang.voices.map((x) => `<option value="${x.id}" ${x.id === a.voice ? 'selected' : ''}>${H.esc(x.name)} — ${H.esc(x.desc)}</option>`).join('')}</optgroup>
+        ${a.lang === 'en' ? `<optgroup label="On this device · private (90 MB download once)">${VOICES.map((x) => `<option value="${x.id}" ${x.id === a.voice ? 'selected' : ''}>${x.name} — ${x.accent} · ${x.desc}</option>`).join('')}</optgroup>` : ''}
+      </select></div>
       <div class="field"><label>Speed <b>${a.speed.toFixed(2)}×</b></label><input type="range" id="ttsSpeed" min="0.6" max="1.6" step="0.05" value="${a.speed}"></div>
       <label class="row"><input type="checkbox" id="ttsCap" ${a.ttsCaptions ? 'checked' : ''}> Add matching captions</label>
       <div class="row mt"><button class="btn ghost" id="ttsPrev" ${a.ttsBusy ? 'disabled' : ''}>${H.icon('play', 14)} Preview</button>
         <button class="btn primary" id="ttsAdd" ${a.ttsBusy ? 'disabled' : ''}>${H.icon('music', 14)} Add voice-over</button></div>
       <p class="muted" id="ttsStatus">${H.esc(a.ttsStatus)}</p>
       ${V.sel?.kind === 'overlay' && findSel()?.type === 'text' ? `<button class="btn ghost small" id="ttsFromText">Use the selected text</button>` : ''}`;
+    $('#ttsLang', body).onchange = (e) => { a.lang = e.target.value; a.voice = ''; renderAudioPanel(p); };
     $('#ttsText', body).oninput = (e) => (a.ttsText = e.target.value);
     $('#ttsVoice', body).onchange = (e) => (a.voice = e.target.value);
     $('#ttsSpeed', body).oninput = (e) => { a.speed = +e.target.value; e.target.previousElementSibling.querySelector('b').textContent = a.speed.toFixed(2) + '×'; };
@@ -1838,24 +1861,33 @@ function renderAudioPanel(p) {
       $('#ttsPrev', body).disabled = true;
       $('#ttsAdd', body).disabled = true;
       try {
-        const out = await speak(a.ttsText, { voice: a.voice, speed: a.speed, onStatus: status });
+        const local = isLocal(a.voice);
+        const out = local ? await speak(a.ttsText, { voice: a.voice, speed: a.speed, onStatus: status }) : await speakOnline(a.ttsText, { voice: a.voice, speed: a.speed, onStatus: status });
         if (!add) {
           playBlob(out.blob);
           status(`Preview · ${out.duration.toFixed(1)}s`);
         } else {
-          const vName = VOICES.find((v) => v.id === a.voice)?.name || 'Voice';
-          const m = await importFile(new File([out.blob], `Voice-over (${vName}).wav`, { type: 'audio/wav' }));
+          const vName = local ? VOICES.find((x) => x.id === a.voice)?.name : lang.voices.find((x) => x.id === a.voice)?.name;
+          const ext = out.blob.type.includes('mpeg') ? 'mp3' : 'wav';
+          const m = await importFile(new File([out.blob], `Voice-over (${vName || 'Voice'}).${ext}`, { type: out.blob.type }));
           const at = V.t >= totalDur() - 0.1 ? 0 : V.t;
           if (m) {
             addAudio(m.id, m.duration, at);
             const au = V.p.audio[V.p.audio.length - 1];
             au.fadeOut = 0;
-            au.name = `Voice: ${vName}`;
+            au.name = `Voice: ${vName || 'Voice'}`;
             if (a.ttsCaptions)
               for (const sg of out.segments) {
                 const pieces = scriptToLines(sg.text);
-                const share = (sg.end - sg.start) / pieces.length;
-                pieces.forEach((piece, i) => V.p.overlays.push(captionOverlay(piece, at + sg.start + i * share, at + sg.start + (i + 1) * share)));
+                if (!pieces.length) continue;
+                const weights = pieces.map((x) => Math.max(2, x.length));
+                const sum = weights.reduce((x, y) => x + y, 0);
+                let t0 = at + sg.start;
+                pieces.forEach((piece, i) => {
+                  const d = ((sg.end - sg.start) * weights[i]) / sum;
+                  V.p.overlays.push(captionOverlay(piece, t0, t0 + d));
+                  t0 += d;
+                });
               }
             commit();
             status(`Voice-over added (${out.duration.toFixed(1)}s)${a.ttsCaptions ? ' with captions' : ''}.`);
@@ -1924,6 +1956,7 @@ export function applyTemplate(id, media = []) {
   const { clips, overlays } = buildFromTemplate(tpl, media);
   V.p.clips = clips;
   V.p.overlays = overlays;
+  fontsIn(overlays);
   V.sel = null;
   V.t = 0;
   prepareAll();
