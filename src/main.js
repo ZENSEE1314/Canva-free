@@ -1,8 +1,11 @@
 import './style.css';
+import './design-extra.css';
 import {
   Canvas, StaticCanvas, Textbox, FabricImage, Group, ActiveSelection, PencilBrush, Shadow,
-  Circle, Rect, filters, cache, util, InteractiveFabricObject,
+  Circle, Rect, filters, cache, util, InteractiveFabricObject, Path, Point, classRegistry,
 } from 'fabric';
+import qrcode from 'qrcode-generator';
+import { needsSite } from './env.js';
 import { jsPDF } from 'jspdf';
 import { storageStatus, saveDesign, getDesign, listDesigns, deleteDesign, uid, listVersions, saveVersion, getVersion, deleteVersion, kvGet, kvSet } from './storage.js';
 import {
@@ -24,6 +27,7 @@ import { fontsIn, fontsInFully, coreFonts, loadFamily } from './fonts.js';
 const PROPS = [
   'name', 'locked', 'selectable', 'evented', 'hasControls', 'lockMovementX', 'lockMovementY',
   'lockRotation', 'lockScalingX', 'lockScalingY', 'bgGradient', 'anim', 'placeholder', 'frameShape', 'kind', 'chart', 'table', 'aiPrompt',
+  'curve', 'qr',
 ];
 
 const app = document.getElementById('app');
@@ -776,7 +780,15 @@ function bindCanvasEvents() {
   });
   c.on('text:changed', () => schedulePersist());
   c.on('text:editing:exited', onChange);
+  // curved text is shown straight while typing, so its box changes size
+  const refit = (e) => { const t = e.target; if (t?.curve) { t.dirty = true; t.setCoords(); c.requestRenderAll(); } };
+  c.on('text:editing:entered', refit);
+  c.on('text:editing:exited', refit);
   const onSel = () => {
+    if (state.crop && c.getActiveObject() !== state.crop.box) {
+      c.setActiveObject(state.crop.box);
+      c.requestRenderAll();
+    }
     renderProps();
     if (state.tab === 'animate' || state.tab === 'ai') renderTab();
   };
@@ -788,6 +800,7 @@ function bindCanvasEvents() {
   let guides = [];
   c.on('object:moving', (e) => {
     const o = e.target;
+    if (state.crop) return;
     const { width: W, height: H } = state.design;
     const tol = 8 / state.zoom;
     guides = [];
@@ -943,7 +956,7 @@ function removeSelected() {
   const objs = c.getActiveObjects();
   if (!objs.length) return;
   const active = c.getActiveObject();
-  if (active?.isEditing) return;
+  if (active?.isEditing || state.crop) return;
   c.discardActiveObject();
   state.loading = true;
   objs.forEach((o) => c.remove(o));
@@ -1059,6 +1072,12 @@ function bindKeyboard() {
     if (isTyping()) return;
     const c = state.canvas;
     const obj = c.getActiveObject();
+    if (state.crop) {
+      if (k === 'escape') finishCrop(false);
+      else if (k === 'enter') { e.preventDefault(); finishCrop(true); }
+      else if (k === 'delete' || k === 'backspace') e.preventDefault();
+      return;
+    }
     if (mod && k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
     else if ((mod && k === 'y') || (mod && e.shiftKey && k === 'z')) { e.preventDefault(); redo(); }
     else if (mod && k === 'c') { e.preventDefault(); copy(); }
@@ -1095,7 +1114,7 @@ function snapshot() {
   return JSON.stringify(state.canvas.toObject(PROPS));
 }
 function pushHistory() {
-  if (state.loading || !state.canvas) return;
+  if (state.loading || !state.canvas || state.crop) return;
   const s = snapshot();
   if (state.history[state.history.length - 1] === s) return;
   state.history.push(s);
@@ -1115,12 +1134,14 @@ async function restore(json) {
   schedulePersist();
 }
 async function undo() {
+  if (state.crop) finishCrop(false);
   if (state.history.length < 2) return;
   state.redo.push(state.history.pop());
   await restore(state.history[state.history.length - 1]);
   updateUndoButtons();
 }
 async function redo() {
+  if (state.crop) finishCrop(false);
   const s = state.redo.pop();
   if (!s) return;
   state.history.push(s);
@@ -1146,6 +1167,7 @@ function captureCurrentPage() {
   const d = state.design;
   const c = state.canvas;
   if (!d || !c) return;
+  if (state.crop) finishCrop(false);
   const page = d.pages[state.page];
   page.json = c.toObject(PROPS);
   try {
@@ -1158,6 +1180,7 @@ function captureCurrentPage() {
 async function persist() {
   clearTimeout(persistTimer);
   if (!state.design || !state.canvas) return;
+  if (state.crop) return; // saved when the crop is finished
   captureCurrentPage();
   state.design.updatedAt = Date.now();
   try {
@@ -1176,6 +1199,7 @@ async function persist() {
 // ---------- Pages ----------
 async function loadPage(i) {
   const c = state.canvas;
+  if (state.crop) finishCrop(false);
   state.page = i;
   await fontsIn(state.design.pages[i]?.json);
   state.loading = true;
@@ -1601,6 +1625,7 @@ function tabText(p) {
   p.innerHTML = `
     <h3>Text</h3>
     <button class="btn primary block" id="addTextBox">${icon('type')} Add a text box</button>
+    ${magicWriteHTML()}
     <div class="text-presets">
       ${TEXT_PRESETS.map((t, i) => `<button class="text-preset" data-tp="${i}" style="font-weight:${t.weight};font-size:${[26, 18, 13][i]}px">${t.label}</button>`).join('')}
     </div>
@@ -1613,6 +1638,7 @@ function tabText(p) {
     <h4>Fonts</h4>
     <div class="font-list">${FONTS.map((f) => `<button class="font-item" data-font="${esc(f)}" style="font-family:'${f}'">${esc(f)}</button>`).join('')}</div>`;
   $('#addTextBox').onclick = () => addText({ text: 'Your text here', size: 0.06, weight: '600' });
+  bindMagicWrite(p);
   $$('[data-tp]', p).forEach((b) => (b.onclick = () => addText(TEXT_PRESETS[+b.dataset.tp])));
   $$('[data-tc]', p).forEach((b) => (b.onclick = () => addText(TEXT_COMBOS[+b.dataset.tc])));
   $$('[data-font]', p).forEach(
@@ -1681,6 +1707,7 @@ async function tabElements(p, view = state.elView) {
       ${row('3d', '3D graphics', '<span class="muted">Loading…</span>').replace('class="lib-row"', 'class="lib-row" id="row3d"')}
       ${row('flat', 'Illustrations', '<span class="muted">Loading…</span>').replace('class="lib-row"', 'class="lib-row" id="rowFlat"')}
       ${row('icons', 'Icons', '<span class="muted">Loading…</span>').replace('class="lib-row"', 'class="lib-row" id="rowIcons"')}
+      ${qrSectionHTML()}
       ${row('', 'Photo frames', FRAMES.map((f) => `<button class="shape-item frame" data-frame2="${f}" title="${f}">${framePreview(f)}</button>`).join(''))}
       ${row('', 'Photo grids', GRIDS.map((g, i) => `<button class="shape-item grid" data-grid="${i}" title="${g.label}">${gridPreview(g)}</button>`).join(''))}
       ${row('', 'Charts', CHART_PRESETS.map((c, i) => `<button class="chart-item" data-chart="${i}" title="${c.label}">${chartPreview(c.type)}<small>${c.label}</small></button>`).join(''))}
@@ -1696,6 +1723,7 @@ async function tabElements(p, view = state.elView) {
   $$('[data-table]', p).forEach((b) => (b.onclick = () => addTableEl(TABLE_PRESETS[+b.dataset.table])));
   $$('[data-gel]', p).forEach((b) => (b.onclick = () => addGradientEl(GRADIENT_ELEMENTS[+b.dataset.gel])));
   $$('[data-st]', p).forEach((b) => (b.onclick = () => addSticker(b.dataset.st)));
+  bindQrSection(p);
 
   // Search across graphics + icons + shapes
   $('#elSearch', p).oninput = debounce(async (e) => {
@@ -2111,6 +2139,7 @@ function colorPicker(id, value) {
   return `<div class="color-picker" id="${id}">
     <div class="row"><input type="color" value="${v}" data-cp="input"><input type="text" value="${esc(value || '')}" data-cp="text" class="hex" spellcheck="false"></div>
     ${state.brand.colors?.length ? `<div class="swatches brand-row" title="Brand colors">${state.brand.colors.map((c) => `<button style="background:${c}" data-cp="sw" data-c="${c}" title="Brand: ${c}"></button>`).join('')}</div>` : ''}
+    ${state.photoColors?.length ? `<small class="cp-label">Photo colours</small><div class="swatches photo-row" title="Colours from your last selected photo">${state.photoColors.map((c) => `<button style="background:${c}" data-cp="sw" data-c="${c}" title="Photo: ${c}"></button>`).join('')}</div>` : ''}
     <div class="swatches">${PALETTE.map((c) => `<button style="background:${c}" data-cp="sw" data-c="${c}" title="${c}"></button>`).join('')}
     <button class="none" data-cp="sw" data-c="transparent" title="Transparent"></button></div>
   </div>`;
@@ -2142,7 +2171,7 @@ function setProp(key, value, { record = true } = {}) {
       o.dirty = true;
       return;
     }
-    if ((o.chart || o.table) && (key === 'fill' || key === 'stroke')) return;
+    if ((o.chart || o.table || o.qr) && (key === 'fill' || key === 'stroke')) return;
     if (o.type === 'group' && (key === 'fill' || key === 'stroke')) {
       o.getObjects().forEach((ch) => ch.set(key, value));
     }
@@ -2177,6 +2206,7 @@ function renderProps() {
   const bar = $('#ctxBar');
   if (!el || !state.canvas) return;
   const c = state.canvas;
+  if (state.crop) return renderCropProps(el, bar);
   const o = c.getActiveObject();
   if (!o) {
     bar.innerHTML = `<span class="muted hint">Select an element to edit it · Right-click for more options · Shortcuts: T text, R rectangle, C circle</span><span class="spacer"></span>
@@ -2205,11 +2235,12 @@ function renderProps() {
       <button class="tool" id="qCase" title="Uppercase / lowercase">aA</button>
       <span class="vsep"></span>` : ''}
     <label class="swatch-btn" title="Color"><span style="background:${fill && fill !== 'transparent' ? fill : 'repeating-conic-gradient(#ccc 0 25%,#fff 0 50%) 0/8px 8px'}"></span><input type="color" id="qFill" value="${toHex(fill)}"></label>
+    ${img ? `<button class="tool" id="qCrop" title="Crop">${xicon('crop')}</button>` : ''}
     <span class="spacer"></span>
     <button class="tool" data-q="forward" title="Bring forward">${icon('up')}</button>
     <button class="tool" data-q="backward" title="Send backward">${icon('down')}</button>
     ${multi ? `<button class="tool" data-q="group" title="Group">${icon('group')}</button>` : ''}
-    ${o.type === 'group' ? `<button class="tool" data-q="ungroup" title="Ungroup">${icon('ungroup')}</button>` : ''}
+    ${o.type === 'group' && !o.qr ? `<button class="tool" data-q="ungroup" title="Ungroup">${icon('ungroup')}</button>` : ''}
     <button class="tool ${o.locked ? 'on' : ''}" data-q="lock" title="Lock">${icon(o.locked ? 'lock' : 'unlock')}</button>
     <button class="tool" data-q="duplicate" title="Duplicate">${icon('copy')}</button>
     <button class="tool" data-q="delete" title="Delete">${icon('trash')}</button>`;
@@ -2217,10 +2248,13 @@ function renderProps() {
   // Right panel (full properties)
   el.innerHTML = `
     <h3>${multi ? `${o.getObjects().length} elements` : esc(o.name || o.type)}</h3>
+    ${multi ? arrangeHTML(o) : ''}
     ${text ? `
     <div class="field"><label>Text color</label>${colorPicker('pFill', fill)}</div>
     <div class="field"><label>Line height <b>${(text.lineHeight || 1).toFixed(2)}</b></label><input type="range" min="0.5" max="3" step="0.05" value="${text.lineHeight}" id="pLH"></div>
     <div class="field"><label>Letter spacing <b>${text.charSpacing || 0}</b></label><input type="range" min="-200" max="1500" step="10" value="${text.charSpacing || 0}" id="pCS"></div>
+    <div class="field"><label>Curve <b id="pCurveV">${text.curve || 0}</b></label><input type="range" min="-100" max="100" step="1" value="${text.curve || 0}" id="pCurve" class="curve-range">
+      <div class="row curve-hint"><span class="muted">Arch down</span><button class="link-btn" id="pCurve0" ${text.curve ? '' : 'hidden'}>Straighten</button><span class="muted">Arch up</span></div></div>
     <div class="field"><label>Highlight</label><div class="row"><input type="color" id="pTBG" value="${toHex(text.textBackgroundColor || '#ffff00')}"><button class="btn ghost small" id="pTBGx">${text.textBackgroundColor ? 'Remove' : 'None'}</button></div></div>
     <div class="field"><label>Outline</label><div class="row"><input type="color" id="pStroke" value="${toHex(text.stroke || '#000000')}"><input type="range" min="0" max="${Math.round(text.fontSize / 4)}" step="0.5" value="${text.strokeWidth || 0}" id="pSW"></div></div>
     ` : ''}
@@ -2230,7 +2264,7 @@ function renderProps() {
       <button class="btn ghost block" id="phPhotos">${icon('image')} Choose from Photos</button>
       <button class="btn ghost block" id="phAI">${icon('wand')} Generate with AI</button></div>` : ''}
     ${dataPropsHTML(o)}
-    ${!text && !img && !o.chart && !o.table ? `
+    ${!text && !img && !o.chart && !o.table && !o.qr ? `
     <div class="field"><label>${o.kind === 'icon' ? 'Icon color' : o.type === 'line' ? 'Line color' : 'Fill'}</label>${colorPicker('pFill', o.type === 'line' || (o.type === 'path' && !o.fill) ? o.stroke : fill)}</div>
     ${!multi && o.type !== 'line' && o.type !== 'group' ? `<div class="field"><label>Gradient fill</label><div class="grad-grid small">${GRADIENTS.slice(0, 8).map((g, i) => `<button class="grad" data-og="${i}" style="background:linear-gradient(135deg,${g[0]},${g[1]})"></button>`).join('')}</div></div>` : ''}
     <div class="field"><label>Border</label><div class="row"><input type="color" id="pStroke" value="${toHex(o.stroke || '#000000')}"><input type="range" min="0" max="60" step="1" value="${o.strokeWidth || 0}" id="pSW"></div>
@@ -2248,7 +2282,7 @@ function renderProps() {
         <label>Offset Y <input type="range" id="shY" min="-100" max="100" value="${shadow.offsetY}"></label>
       </div>` : ''}
     </div>
-    <h4>Position</h4>
+    <h4>${multi ? 'Align to page' : 'Position'}</h4>
     <div class="align-grid">
       <button data-al="left" title="Align left">${icon('al-left')}</button>
       <button data-al="hcenter" title="Align center">${icon('al-hcenter')}</button>
@@ -2281,6 +2315,7 @@ function imageFiltersHTML(img) {
   const r = (id, label, min, max, step, v) =>
     `<label class="frow">${label} <input type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${v}"></label>`;
   return `
+    ${imageExtrasHTML(img)}
     ${bgRemoverHTML()}
     <h4>Adjust</h4>
     <div class="field">
@@ -2297,6 +2332,7 @@ function imageFiltersHTML(img) {
         .map((n) => `<button class="${f.preset === n ? 'on' : ''}" data-fp="${n}">${n}</button>`)
         .join('')}
     </div>
+    ${duotoneHTML(img)}
     <h4>Frame</h4>
     <div class="row wrap">${['none', 'circle', 'rounded', 'star', 'heart', 'hexagon'].map((fr) => `<button class="btn ghost small" data-fr="${fr}">${fr}</button>`).join('')}</div>`;
 }
@@ -2339,6 +2375,8 @@ function applyFilters(img, v) {
   if (v.hue) list.push(new filters.HueRotation({ rotation: v.hue }));
   if (v.blur) list.push(new filters.Blur({ blur: v.blur }));
   if (v.pixelate > 1) list.push(new filters.Pixelate({ blocksize: v.pixelate }));
+  const duo = (img.filters || []).find((f) => f?.type === 'Duotone');
+  if (duo) list.push(duo);
   img.filters = list;
   img.applyFilters();
   state.canvas.requestRenderAll();
@@ -2368,6 +2406,7 @@ function bindProps(o, text, img) {
   const commit = () => { pushHistory(); schedulePersist(); };
 
   bindDataProps(o);
+  bindExtras(o, text, img);
   // photo placeholder
   on('phUpload', 'onclick', () => {
     const inp = document.createElement('input');
@@ -3526,6 +3565,7 @@ async function runAIFillAll(p) {
 // CHART / TABLE DATA EDITING
 // =====================================================
 function dataPropsHTML(o) {
+  if (o.qr) return qrPropsHTML(o);
   if (o.chart) {
     const ch = o.chart;
     const multi = ch.type === 'donut' || ch.type === 'pie';
@@ -3546,6 +3586,7 @@ function dataPropsHTML(o) {
   return '';
 }
 function bindDataProps(o) {
+  if (o.qr) bindQrProps(o);
   if (o.chart) {
     const read = (color) => ({
       type: $('#chType').value,
@@ -3624,12 +3665,863 @@ async function boot() {
   }
   renderHome();
 }
+// =====================================================
+// DESIGN EXTRAS: curved text, QR codes, crop, duotone, photo colours,
+// arrange selection, Magic Write
+// =====================================================
+const XI = {
+  crop: '<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>',
+  qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v1M14 20h1M18 18h3v3"/>',
+  'dist-h': '<path d="M4 3v18M20 3v18"/><rect x="9" y="7" width="6" height="10" rx="1"/>',
+  'dist-v': '<path d="M3 4h18M3 20h18"/><rect x="7" y="9" width="10" height="6" rx="1"/>',
+};
+function xicon(name, size = 18) {
+  return `<svg class="ic" viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${XI[name] || ''}</svg>`;
+}
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+/** One-time setup: teach Fabric's Textbox to draw itself on an arc, and register the duotone filter. */
+function installDesignExtras() {
+  if (installDesignExtras.done) return;
+  installDesignExtras.done = true;
+  const P = Textbox.prototype;
+  P.curve = 0;
+  const curved = (t) => !!t.curve && !t.isEditing && !!t.text;
+  const td = P._getTransformedDimensions;
+  P._getTransformedDimensions = function (options = {}) {
+    if (curved(this) && options.width === undefined && options.height === undefined) {
+      const L = curveLayout(this);
+      return td.call(this, { ...options, width: L.w, height: L.h });
+    }
+    return td.call(this, options);
+  };
+  const ntd = P._getNonTransformedDimensions;
+  P._getNonTransformedDimensions = function () {
+    if (!curved(this)) return ntd.call(this);
+    const L = curveLayout(this);
+    return new Point(L.w, L.h).scalarAdd(this.strokeWidth);
+  };
+  const init = P.initDimensions;
+  P.initDimensions = function () {
+    this.__curve = null;
+    return init.call(this);
+  };
+  const vis = P.isControlVisible;
+  P.isControlVisible = function (key) {
+    if ((key === 'ml' || key === 'mr') && curved(this)) return false;
+    return vis.call(this, key);
+  };
+  const render = P._render;
+  P._render = function (ctx) {
+    if (!curved(this)) return render.call(this, ctx);
+    const L = curveLayout(this);
+    ctx.save();
+    this._setTextStyles(ctx);
+    ctx.textAlign = 'left';
+    const hasStroke = this.stroke && this.strokeWidth > 0;
+    const hasFill = this.fill && this.fill !== 'transparent';
+    if (hasFill) this._setFillStyles(ctx, this);
+    if (hasStroke) this._setStrokeStyles(ctx, this);
+    const paint = (mode) => {
+      for (const ch of L.chars) {
+        ctx.save();
+        ctx.translate(ch.x, ch.y);
+        ctx.rotate(ch.a);
+        if (mode === 'fill') ctx.fillText(ch.ch, -ch.w / 2, 0);
+        else ctx.strokeText(ch.ch, -ch.w / 2, 0);
+        ctx.restore();
+      }
+    };
+    const order = this.paintFirst === 'stroke' ? ['stroke', 'fill'] : ['fill', 'stroke'];
+    for (const m of order) {
+      if (m === 'fill' && hasFill) paint('fill');
+      if (m === 'stroke' && hasStroke) {
+        paint('stroke');
+        this._removeShadow?.(ctx);
+      }
+    }
+    ctx.restore();
+  };
+  const svg = P._toSVG;
+  P._toSVG = function () {
+    if (!curved(this)) return svg.call(this);
+    const L = curveLayout(this);
+    const f = (n) => (Math.round(n * 100) / 100).toString();
+    const xs = [];
+    const ys = [];
+    const rs = [];
+    for (const ch of L.chars) {
+      const cs = Math.cos(ch.a);
+      const sn = Math.sin(ch.a);
+      // SVG places each glyph by its start point on the baseline and rotates it about that point
+      for (const _ of [...ch.ch]) {
+        xs.push(f(ch.x - (ch.w / 2) * cs));
+        ys.push(f(ch.y - (ch.w / 2) * sn));
+        rs.push(f((ch.a * 180) / Math.PI));
+      }
+    }
+    return [
+      '\t\t<text xml:space="preserve" ',
+      `font-family="${esc(this.fontFamily)}" font-size="${this.fontSize}" `,
+      this.fontStyle ? `font-style="${this.fontStyle}" ` : '',
+      this.fontWeight ? `font-weight="${this.fontWeight}" ` : '',
+      'style="', this.getSvgStyles(true), '"', this.addPaintOrder(),
+      ` x="${xs.join(' ')}" y="${ys.join(' ')}" rotate="${rs.join(' ')}">`,
+      esc(L.chars.map((c) => c.ch).join('')),
+      '</text>\n',
+    ];
+  };
+
+  // ---- Duotone: map dark tones to one colour and light tones to another
+  const hexRGB = (h) => {
+    const v = toHex(h).slice(1);
+    return [0, 2, 4].map((i) => parseInt(v.slice(i, i + 2), 16) / 255);
+  };
+  class Duotone extends filters.BaseFilter {
+    getFragmentSource() {
+      return `
+        precision highp float;
+        uniform sampler2D uTexture;
+        uniform vec3 uDark;
+        uniform vec3 uLight;
+        varying vec2 vTexCoord;
+        void main() {
+          vec4 color = texture2D(uTexture, vTexCoord);
+          float l = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+          gl_FragColor = vec4(mix(uDark, uLight, l), color.a);
+        }`;
+    }
+    applyTo2d({ imageData: { data } }) {
+      const d = hexRGB(this.dark);
+      const l = hexRGB(this.light);
+      const lut = [0, 1, 2].map((k) => {
+        const a = new Uint8ClampedArray(256);
+        for (let i = 0; i < 256; i++) a[i] = Math.round((d[k] + (l[k] - d[k]) * (i / 255)) * 255);
+        return a;
+      });
+      for (let i = 0; i < data.length; i += 4) {
+        const y = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+        data[i] = lut[0][y];
+        data[i + 1] = lut[1][y];
+        data[i + 2] = lut[2][y];
+      }
+    }
+    sendUniformData(gl, loc) {
+      gl.uniform3fv(loc.uDark, hexRGB(this.dark));
+      gl.uniform3fv(loc.uLight, hexRGB(this.light));
+    }
+  }
+  Duotone.type = 'Duotone';
+  Duotone.defaults = { dark: '#2b1055', light: '#ff9a3c' };
+  Duotone.uniformLocations = ['uDark', 'uLight'];
+  classRegistry.setClass(Duotone);
+  installDesignExtras.Duotone = Duotone;
+}
+
+// ---------- Curved text ----------
+let curveCtx;
+/** Where each letter sits when a text is bent on a circle. Cached until the text, font or curve change. */
+function curveLayout(t) {
+  const font = t._getFontDeclaration();
+  const key = `${t.text}|${font}|${t.charSpacing}|${t.curve}`;
+  if (t.__curve?.key === key) return t.__curve;
+  curveCtx ||= document.createElement('canvas').getContext('2d');
+  curveCtx.font = font;
+  const fs = t.fontSize;
+  const glyphs = t.graphemeSplit(String(t.text).replace(/\s*\n\s*/g, ' '));
+  const gap = ((t.charSpacing || 0) / 1000) * fs;
+  const widths = glyphs.map((g) => curveCtx.measureText(g).width);
+  const total = widths.reduce((a, b) => a + b, 0) + gap * Math.max(0, glyphs.length - 1);
+  const k = clamp(t.curve, -100, 100) / 100;
+  const span = Math.abs(k) * Math.PI * 2 * 0.94; // 100 = almost a full circle
+  const R = total / Math.max(span, 1e-6);
+  const asc = fs * 0.8;
+  const desc = fs * 0.24;
+  const chars = [];
+  let pos = -total / 2;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  glyphs.forEach((ch, i) => {
+    const w = widths[i];
+    const phi = (pos + w / 2) / R;
+    pos += w + gap;
+    // positive curve: letters stand on top of the circle; negative: they hang under it
+    const x = R * Math.sin(phi);
+    const y = k > 0 ? R - R * Math.cos(phi) : R * Math.cos(phi) - R;
+    const a = k > 0 ? phi : -phi;
+    const cs = Math.cos(a);
+    const sn = Math.sin(a);
+    for (const dx of [-w / 2, w / 2]) {
+      for (const dy of [-asc, desc]) {
+        const px = x + dx * cs - dy * sn;
+        const py = y + dx * sn + dy * cs;
+        minX = Math.min(minX, px); maxX = Math.max(maxX, px);
+        minY = Math.min(minY, py); maxY = Math.max(maxY, py);
+      }
+    }
+    chars.push({ ch, w, x, y, a });
+  });
+  if (!chars.length) { minX = minY = -1; maxX = maxY = 1; }
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  chars.forEach((c) => { c.x -= cx; c.y -= cy; });
+  t.__curve = { key, chars, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) };
+  return t.__curve;
+}
+
+function setCurve(o, v) {
+  const cp = o.getCenterPoint();
+  o.curve = v;
+  o.__curve = null;
+  o.dirty = true;
+  o.setPositionByOrigin(cp, 'center', 'center');
+  o.setCoords();
+  state.canvas.requestRenderAll();
+}
+
+// ---------- QR codes ----------
+/** A crisp vector QR code: a background square and one path of dark modules, sized `size` px. */
+function buildQR(spec, size) {
+  const text = String(spec.text || '').slice(0, 1200);
+  const q = qrcode(0, 'M');
+  // the encoder works on bytes; feed it UTF-8 so Chinese, emoji, etc. scan correctly
+  q.addData(String.fromCharCode(...new TextEncoder().encode(text)), 'Byte');
+  q.make();
+  const n = q.getModuleCount();
+  const m = 2; // quiet zone in modules
+  const tot = n + m * 2;
+  let d = '';
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; ) {
+      if (!q.isDark(r, c)) { c++; continue; }
+      let e = c;
+      while (e < n && q.isDark(r, e)) e++;
+      d += `M${c + m} ${r + m}h${e - c}v1h${c - e}z`;
+      c = e;
+    }
+  }
+  const transparent = !spec.bg || spec.bg === 'transparent';
+  const bg = new Rect({ left: 0, top: 0, width: tot, height: tot, fill: transparent ? '' : spec.bg, strokeWidth: 0, name: 'QR background' });
+  const dots = new Path(d, { fill: spec.fg || '#111827', strokeWidth: 0, name: 'QR modules' });
+  const g = new Group([bg, dots], { name: 'QR code', kind: 'qr', qr: { text, fg: spec.fg || '#111827', bg: transparent ? 'transparent' : spec.bg } });
+  g.scale(size / tot);
+  return g;
+}
+function addQR(spec) {
+  if (!String(spec.text || '').trim()) return toast('Type a link or some text first');
+  try {
+    return place(buildQR(spec, minSide() * 0.35));
+  } catch (e) {
+    console.error(e);
+    toast('That is too long for a QR code — try a shorter link');
+  }
+}
+function qrSectionHTML() {
+  return `<section class="lib-sec qr-sec"><div class="lib-head"><h4>${xicon('qr', 16)} QR code</h4></div>
+    <div class="qr-form">
+      <input class="search" id="qrText" placeholder="Paste a link or type text" value="${esc(state.qrDraft?.text || '')}">
+      <div class="row qr-row">
+        <label class="qr-col" title="Code colour"><input type="color" id="qrFg" value="${toHex(state.qrDraft?.fg || '#111827')}"><span>Code</span></label>
+        <label class="qr-col" title="Background colour"><input type="color" id="qrBg" value="${toHex(state.qrDraft?.bg || '#ffffff')}"><span>Background</span></label>
+        <span class="spacer"></span>
+        <button class="btn primary small" id="qrAdd">Add QR code</button>
+      </div>
+    </div></section>`;
+}
+function bindQrSection(p) {
+  const btn = $('#qrAdd', p);
+  if (!btn) return;
+  const read = () => (state.qrDraft = { text: $('#qrText', p).value.trim(), fg: $('#qrFg', p).value, bg: $('#qrBg', p).value });
+  ['qrText', 'qrFg', 'qrBg'].forEach((id) => ($('#' + id, p).oninput = read));
+  $('#qrText', p).onkeydown = (e) => { if (e.key === 'Enter') btn.click(); };
+  btn.onclick = () => addQR(read());
+}
+function qrPropsHTML(o) {
+  const q = o.qr;
+  const tr = q.bg === 'transparent';
+  return `<h4>QR code</h4>
+    <label class="flabel">Link or text<textarea class="search" id="qrEText" rows="3">${esc(q.text)}</textarea></label>
+    <div class="row qr-row mt">
+      <label class="qr-col"><input type="color" id="qrEFg" value="${toHex(q.fg)}"><span>Code</span></label>
+      <label class="qr-col"><input type="color" id="qrEBg" value="${toHex(tr ? '#ffffff' : q.bg)}"><span>Background</span></label>
+      <label class="row qr-tr"><input type="checkbox" id="qrETr" ${tr ? 'checked' : ''}> No background</label>
+    </div>
+    <button class="btn primary block mt" id="qrEApply">Update QR code</button>`;
+}
+function bindQrProps(o) {
+  const apply = () => {
+    const spec = { text: $('#qrEText').value.trim(), fg: $('#qrEFg').value, bg: $('#qrETr').checked ? 'transparent' : $('#qrEBg').value };
+    if (!spec.text) return toast('Type a link or some text first');
+    try {
+      const size = o.width;
+      rebuildDataObject(o, () => buildQR(spec, size));
+    } catch (e) {
+      console.error(e);
+      toast('That is too long for a QR code — try a shorter link');
+    }
+  };
+  $('#qrEApply').onclick = apply;
+  ['qrEFg', 'qrEBg', 'qrETr'].forEach((id) => ($('#' + id).onchange = apply));
+}
+
+// ---------- Image extras: crop button, photo colours ----------
+function imgNatural(img) {
+  const el = img._originalElement || img.getElement();
+  return { w: el.naturalWidth || el.width || img.width, h: el.naturalHeight || el.height || img.height };
+}
+function isCropped(img) {
+  const N = imgNatural(img);
+  return (img.cropX || 0) > 0.5 || (img.cropY || 0) > 0.5 || img.width < N.w - 0.5 || img.height < N.h - 0.5;
+}
+function imageExtrasHTML(img) {
+  const pal = paletteFor(img);
+  return `<div class="row wrap img-tools">
+      <button class="btn ghost small" id="imgCrop">${xicon('crop', 16)} Crop</button>
+      ${isCropped(img) ? `<button class="btn ghost small" id="imgCropReset">Reset crop</button>` : ''}
+    </div>
+    ${pal.length ? `<h4>Photo colours</h4>
+    <div class="photo-cols">${pal.map((c) => `<button style="background:${c}" data-pcol="${c}" title="${c}"></button>`).join('')}</div>
+    <p class="muted tiny">Click a colour to use it as the page background. They also appear under “Photo colours” in every colour picker.</p>` : ''}`;
+}
+/** Main colours of an image (k-means on a small copy of the visible part). */
+function extractPalette(img, k = 6) {
+  const el = img._originalElement || img.getElement();
+  const sx = img.cropX || 0;
+  const sy = img.cropY || 0;
+  const sw = img.width;
+  const sh = img.height;
+  const S = 72;
+  const sc = Math.min(1, S / Math.max(sw, sh));
+  const cw = Math.max(1, Math.round(sw * sc));
+  const ch = Math.max(1, Math.round(sh * sc));
+  const cv = document.createElement('canvas');
+  cv.width = cw;
+  cv.height = ch;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  let data;
+  try {
+    ctx.drawImage(el, sx, sy, sw, sh, 0, 0, cw, ch);
+    data = ctx.getImageData(0, 0, cw, ch).data;
+  } catch {
+    return [];
+  }
+  const px = [];
+  for (let i = 0; i < data.length; i += 4) if (data[i + 3] > 160) px.push([data[i], data[i + 1], data[i + 2]]);
+  if (!px.length) return [];
+  const dist = (a, b) => (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
+  // farthest-point start keeps the result stable (no randomness) and spreads the seeds out
+  const cents = [px[Math.floor(px.length / 2)].slice()];
+  const dmin = px.map((p) => dist(p, cents[0]));
+  while (cents.length < Math.min(k, px.length)) {
+    let bi = 0;
+    for (let i = 1; i < px.length; i++) if (dmin[i] > dmin[bi]) bi = i;
+    if (dmin[bi] === 0) break;
+    cents.push(px[bi].slice());
+    for (let i = 0; i < px.length; i++) dmin[i] = Math.min(dmin[i], dist(px[i], cents[cents.length - 1]));
+  }
+  let counts = [];
+  for (let it = 0; it < 12; it++) {
+    const sum = cents.map(() => [0, 0, 0]);
+    counts = cents.map(() => 0);
+    for (const p of px) {
+      let bj = 0;
+      let bd = Infinity;
+      for (let j = 0; j < cents.length; j++) {
+        const dd = dist(p, cents[j]);
+        if (dd < bd) { bd = dd; bj = j; }
+      }
+      counts[bj]++;
+      sum[bj][0] += p[0]; sum[bj][1] += p[1]; sum[bj][2] += p[2];
+    }
+    cents.forEach((c, j) => { if (counts[j]) for (let q = 0; q < 3; q++) c[q] = sum[j][q] / counts[j]; });
+  }
+  const hex = (c) => '#' + c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
+  const out = [];
+  cents
+    .map((c, j) => ({ c, n: counts[j] }))
+    .filter((x) => x.n > 0)
+    .sort((a, b) => b.n - a.n)
+    .forEach(({ c }) => { if (!out.some((o) => dist(o, c) < 18 * 18)) out.push(c); });
+  return out.map(hex);
+}
+function paletteFor(img) {
+  const key = `${img.getSrc?.() || ''}|${img.cropX}|${img.cropY}|${img.width}|${img.height}`;
+  if (img.__palette?.key !== key) img.__palette = { key, colors: extractPalette(img) };
+  if (img.__palette.colors.length) state.photoColors = img.__palette.colors;
+  return img.__palette.colors;
+}
+
+// ---------- Duotone ----------
+const DUO_PRESETS = [
+  { name: 'Purple / orange', dark: '#3b0a6b', light: '#ff9a3c' },
+  { name: 'Blue / pink', dark: '#1e3a8a', light: '#ff8fc7' },
+  { name: 'Black / gold', dark: '#111111', light: '#f5c542' },
+  { name: 'Teal / coral', dark: '#0f4c5c', light: '#ff7f6e' },
+  { name: 'Forest / lime', dark: '#0b3d2e', light: '#c6f36b' },
+  { name: 'Navy / cream', dark: '#14213d', light: '#fbeec1' },
+];
+const getDuotone = (img) => (img.filters || []).find((f) => f?.type === 'Duotone');
+function duotoneHTML(img) {
+  const d = getDuotone(img);
+  return `<h4>Duotone</h4>
+    <div class="duo-grid">
+      <button class="duo none ${d ? '' : 'on'}" data-duo="none" title="No duotone">None</button>
+      ${DUO_PRESETS.map((p, i) => `<button class="duo ${d && d.dark === p.dark && d.light === p.light ? 'on' : ''}" data-duo="${i}" title="${p.name}" style="background:linear-gradient(135deg,${p.dark} 0 50%,${p.light} 50% 100%)"></button>`).join('')}
+    </div>
+    <div class="row duo-custom">
+      <label class="qr-col"><input type="color" id="duoDark" value="${toHex(d?.dark || DUO_PRESETS[0].dark)}"><span>Shadows</span></label>
+      <label class="qr-col"><input type="color" id="duoLight" value="${toHex(d?.light || DUO_PRESETS[0].light)}"><span>Highlights</span></label>
+    </div>`;
+}
+function setDuotone(img, dark, light) {
+  const list = (img.filters || []).filter((f) => f && f.type !== 'Duotone');
+  if (dark) list.push(new installDesignExtras.Duotone({ dark, light }));
+  img.filters = list;
+  img.applyFilters();
+  img.dirty = true;
+  state.canvas?.requestRenderAll();
+}
+
+// ---------- Arrange several selected elements ----------
+function arrangeHTML(sel) {
+  const n = sel.getObjects().length;
+  return `<h4>Align elements</h4>
+    <div class="align-grid">
+      <button data-arr="left" title="Align left edges">${icon('al-left')}</button>
+      <button data-arr="hcenter" title="Align centers">${icon('al-hcenter')}</button>
+      <button data-arr="right" title="Align right edges">${icon('al-right')}</button>
+      <button data-arr="top" title="Align tops">${icon('al-top')}</button>
+      <button data-arr="vcenter" title="Align middles">${icon('al-vcenter')}</button>
+      <button data-arr="bottom" title="Align bottoms">${icon('al-bottom')}</button>
+    </div>
+    <h4>Space evenly</h4>
+    <div class="row dist-row">
+      <button class="btn ghost small" data-arr="dist-h" ${n < 3 ? 'disabled title="Select 3 or more elements"' : 'title="Equal gaps from left to right"'}>${xicon('dist-h', 16)} Horizontally</button>
+      <button class="btn ghost small" data-arr="dist-v" ${n < 3 ? 'disabled title="Select 3 or more elements"' : 'title="Equal gaps from top to bottom"'}>${xicon('dist-v', 16)} Vertically</button>
+    </div>`;
+}
+/** Align the selected elements to each other, or give them equal gaps. */
+function arrangeSelection(how) {
+  const c = state.canvas;
+  const sel = c.getActiveObject();
+  if (!(sel instanceof ActiveSelection)) return;
+  const objs = sel.getObjects();
+  c.discardActiveObject();
+  const items = objs.map((o) => ({ o, b: o.getBoundingRect() }));
+  const L = Math.min(...items.map((i) => i.b.left));
+  const T = Math.min(...items.map((i) => i.b.top));
+  const R = Math.max(...items.map((i) => i.b.left + i.b.width));
+  const B = Math.max(...items.map((i) => i.b.top + i.b.height));
+  const move = (o, dx, dy) => {
+    if (o.locked) return;
+    o.set({ left: o.left + dx, top: o.top + dy });
+    o.setCoords();
+  };
+  if (how === 'dist-h' || how === 'dist-v') {
+    const h = how === 'dist-h';
+    const s = [...items].sort((a, b) => (h ? a.b.left + a.b.width / 2 - (b.b.left + b.b.width / 2) : a.b.top + a.b.height / 2 - (b.b.top + b.b.height / 2)));
+    const size = s.reduce((a, i) => a + (h ? i.b.width : i.b.height), 0);
+    const gap = ((h ? R - L : B - T) - size) / (s.length - 1);
+    let at = h ? L : T;
+    for (const i of s) {
+      if (h) move(i.o, at - i.b.left, 0);
+      else move(i.o, 0, at - i.b.top);
+      at += (h ? i.b.width : i.b.height) + gap;
+    }
+  } else {
+    for (const { o, b } of items) {
+      if (how === 'left') move(o, L - b.left, 0);
+      if (how === 'right') move(o, R - (b.left + b.width), 0);
+      if (how === 'hcenter') move(o, (L + R) / 2 - (b.left + b.width / 2), 0);
+      if (how === 'top') move(o, 0, T - b.top);
+      if (how === 'bottom') move(o, 0, B - (b.top + b.height));
+      if (how === 'vcenter') move(o, 0, (T + B) / 2 - (b.top + b.height / 2));
+    }
+  }
+  c.setActiveObject(new ActiveSelection(objs, { canvas: c }));
+  c.requestRenderAll();
+  pushHistory();
+  schedulePersist();
+  renderProps();
+}
+
+// ---------- Crop ----------
+const CROP_RATIOS = [['free', 'Free', 0], ['orig', 'Original', -1], ['1:1', '1:1', 1], ['4:5', '4:5', 4 / 5], ['16:9', '16:9', 16 / 9], ['9:16', '9:16', 9 / 16]];
+/** Turn a vector in the image's own pixels into a vector on the page (scale, flip and rotation). */
+function imgVec(img, x, y) {
+  const m = util.composeMatrix({ scaleX: img.scaleX, scaleY: img.scaleY, flipX: img.flipX, flipY: img.flipY, angle: img.angle, skewX: img.skewX, skewY: img.skewY });
+  return new Point(x, y).transform(m, true);
+}
+function pageToImg(img, p) {
+  const m = util.composeMatrix({ scaleX: img.scaleX, scaleY: img.scaleY, flipX: img.flipX, flipY: img.flipY, angle: img.angle, skewX: img.skewX, skewY: img.skewY });
+  return p.subtract(img.getCenterPoint()).transform(util.invertTransform(m), true);
+}
+function startCrop(img) {
+  const c = state.canvas;
+  if (state.crop || !img || img.type !== 'image') return;
+  if (img.locked) return toast('Unlock the image to crop it');
+  const N = imgNatural(img);
+  const orig = { cropX: img.cropX || 0, cropY: img.cropY || 0, width: img.width, height: img.height, left: img.left, top: img.top, clipPath: img.clipPath, selectable: img.selectable, evented: img.evented };
+  const center = img.getCenterPoint();
+  state.loading = true;
+  // show the whole photo, with the current crop staying exactly where it is
+  const off = imgVec(img, orig.cropX + orig.width / 2 - N.w / 2, orig.cropY + orig.height / 2 - N.h / 2);
+  img.set({ cropX: 0, cropY: 0, width: N.w, height: N.h, clipPath: undefined, selectable: false, evented: false });
+  img.setPositionByOrigin(center.subtract(off), 'center', 'center');
+  img.setCoords();
+  img.dirty = true;
+  const box = new Rect({
+    originX: 'center', originY: 'center', fill: 'transparent', strokeWidth: 0, objectCaching: false,
+    lockRotation: true, lockSkewingX: true, lockSkewingY: true, lockScalingFlip: true, excludeFromExport: true,
+    cornerSize: isMobile() ? 18 : 13, touchCornerSize: 40, cornerStyle: 'rect', cornerColor: '#ffffff', cornerStrokeColor: '#7c3aed',
+    borderColor: '#ffffff', padding: 0, name: 'Crop area',
+  });
+  box.setControlsVisibility({ mtr: false });
+  box._render = function (ctx) {
+    const w = this.width;
+    const h = this.height;
+    const z = (this.canvas?.getZoom?.() || 1) * Math.abs(this.scaleX || 1);
+    const lw = 1 / z;
+    const B = 1e5;
+    ctx.save();
+    ctx.fillStyle = 'rgba(17,12,34,0.6)';
+    ctx.beginPath();
+    ctx.rect(-B, -B, 2 * B, 2 * B);
+    ctx.rect(-w / 2, -h / 2, w, h);
+    ctx.fill('evenodd');
+    ctx.strokeStyle = 'rgba(255,255,255,0.65)';
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    for (const f of [1 / 3, 2 / 3]) {
+      ctx.moveTo(-w / 2 + w * f, -h / 2); ctx.lineTo(-w / 2 + w * f, h / 2);
+      ctx.moveTo(-w / 2, -h / 2 + h * f); ctx.lineTo(w / 2, -h / 2 + h * f);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2 * lw;
+    ctx.strokeRect(-w / 2, -h / 2, w, h);
+    ctx.restore();
+  };
+  c.add(box);
+  state.loading = false;
+  state.crop = { img, box, N, orig, ratio: 'free', uniform: c.uniformScaling, rect: { x: orig.cropX, y: orig.cropY, w: orig.width, h: orig.height } };
+  c.uniformScaling = false;
+  const sync = () => { syncCropFromBox(); placeCropBox(); updateCropSliders(); };
+  box.on('moving', sync);
+  box.on('scaling', sync);
+  box.on('modified', sync);
+  placeCropBox();
+  c.setActiveObject(box);
+  c.requestRenderAll();
+  if (!isMobile() && !state.propsOpen) setPropsOpen(true);
+  renderProps();
+}
+function cropAspect() {
+  const cr = state.crop;
+  const r = CROP_RATIOS.find((x) => x[0] === cr.ratio)?.[2] || 0;
+  if (r === -1) return (cr.N.w * Math.abs(cr.img.scaleX)) / (cr.N.h * Math.abs(cr.img.scaleY));
+  return r;
+}
+/** Keep the crop rectangle inside the photo, at least 8px, and at the chosen shape. */
+function clampCropRect(anchor = 'center') {
+  const { N, img } = state.crop;
+  const r = state.crop.rect;
+  const cx = r.x + r.w / 2;
+  const cy = r.y + r.h / 2;
+  let w = clamp(r.w, 8, N.w);
+  let h = clamp(r.h, 8, N.h);
+  const a = cropAspect();
+  if (a) {
+    const k = Math.abs(img.scaleX) / Math.abs(img.scaleY); // page aspect = (w * sx) / (h * sy)
+    if ((w * k) / h > a) w = (a * h) / k;
+    else h = (w * k) / a;
+  }
+  let x = anchor === 'keep' ? r.x : cx - w / 2;
+  let y = anchor === 'keep' ? r.y : cy - h / 2;
+  x = clamp(x, 0, N.w - w);
+  y = clamp(y, 0, N.h - h);
+  state.crop.rect = { x, y, w, h };
+}
+function syncCropFromBox() {
+  const { img, box } = state.crop;
+  const w = (box.width * box.scaleX) / Math.abs(img.scaleX);
+  const h = (box.height * box.scaleY) / Math.abs(img.scaleY);
+  const p = pageToImg(img, box.getCenterPoint());
+  const { N } = state.crop;
+  state.crop.rect = { x: p.x + N.w / 2 - w / 2, y: p.y + N.h / 2 - h / 2, w, h };
+  clampCropRect();
+}
+function placeCropBox() {
+  const { img, box, N, rect } = state.crop;
+  const center = img.getCenterPoint().add(imgVec(img, rect.x + rect.w / 2 - N.w / 2, rect.y + rect.h / 2 - N.h / 2));
+  box.set({ width: rect.w, height: rect.h, scaleX: Math.abs(img.scaleX), scaleY: Math.abs(img.scaleY), angle: img.angle || 0 });
+  box.setPositionByOrigin(center, 'center', 'center');
+  const locked = !!cropAspect();
+  box.setControlsVisibility({ ml: !locked, mr: !locked, mt: !locked, mb: !locked, mtr: false });
+  state.canvas.uniformScaling = locked;
+  box.setCoords();
+  state.canvas.requestRenderAll();
+}
+function cropSliderValues() {
+  const { N, rect } = state.crop;
+  return {
+    l: Math.round((rect.x / N.w) * 1000) / 10,
+    r: Math.round(((N.w - rect.x - rect.w) / N.w) * 1000) / 10,
+    t: Math.round((rect.y / N.h) * 1000) / 10,
+    b: Math.round(((N.h - rect.y - rect.h) / N.h) * 1000) / 10,
+  };
+}
+function updateCropSliders() {
+  if (!state.crop) return;
+  const v = cropSliderValues();
+  for (const k of ['l', 'r', 't', 'b']) {
+    const s = $(`#crop_${k}`);
+    if (s && document.activeElement !== s) s.value = v[k];
+    const lab = $(`#crop_${k}_v`);
+    if (lab) lab.textContent = `${Math.round(v[k])}%`;
+  }
+  const sz = $('#cropSize');
+  if (sz) sz.textContent = `${Math.round(state.crop.rect.w)} × ${Math.round(state.crop.rect.h)} px`;
+}
+function renderCropProps(el, bar) {
+  const cr = state.crop;
+  const v = cropSliderValues();
+  const ratios = CROP_RATIOS.map(([id, label]) => `<button class="chip ${cr.ratio === id ? 'on' : ''}" data-cratio="${id}">${label}</button>`).join('');
+  bar.innerHTML = `<b class="crop-title">${xicon('crop', 16)} Crop</b>
+    <select id="cropRatioQ" class="crop-ratio-q" title="Shape">${CROP_RATIOS.map(([id, label]) => `<option value="${id}" ${cr.ratio === id ? 'selected' : ''}>${label}</option>`).join('')}</select>
+    <span class="spacer"></span>
+    ${isMobile() ? `<button class="btn ghost small" id="cropMore" title="Precise sliders">Adjust</button>` : ''}
+    <button class="btn ghost small" id="cropCancelQ">Cancel</button>
+    <button class="btn primary small" id="cropDoneQ">Done</button>`;
+  const sl = (k, label) => `<label class="frow crop-sl">${label} <b id="crop_${k}_v">${Math.round(v[k])}%</b><input type="range" id="crop_${k}" min="0" max="95" step="0.5" value="${v[k]}"></label>`;
+  el.innerHTML = `<h3>Crop image</h3>
+    <p class="muted">Drag the box or its handles on the photo, or use the sliders. <span id="cropSize">${Math.round(cr.rect.w)} × ${Math.round(cr.rect.h)} px</span></p>
+    <h4>Shape</h4><div class="chips">${ratios}</div>
+    <h4>Trim edges</h4>
+    <div class="field">${sl('l', 'Left')}${sl('r', 'Right')}${sl('t', 'Top')}${sl('b', 'Bottom')}</div>
+    <button class="btn ghost block" id="cropReset">Reset crop</button>
+    <div class="row crop-actions"><button class="btn ghost" id="cropCancel">Cancel</button><button class="btn primary" id="cropDone">Done</button></div>`;
+  const setRatio = (id) => {
+    cr.ratio = id;
+    if (cropAspect()) {
+      // biggest box of that shape around the current centre
+      const r = cr.rect;
+      cr.rect = { x: r.x + r.w / 2 - cr.N.w / 2, y: r.y + r.h / 2 - cr.N.h / 2, w: cr.N.w, h: cr.N.h };
+    }
+    clampCropRect();
+    placeCropBox();
+    renderProps();
+  };
+  $$('[data-cratio]', el).forEach((b) => (b.onclick = () => setRatio(b.dataset.cratio)));
+  $('#cropRatioQ').onchange = (e) => setRatio(e.target.value);
+  const more = $('#cropMore');
+  if (more) more.onclick = () => setPropsOpen(!state.propsOpen);
+  for (const k of ['l', 'r', 't', 'b']) {
+    $(`#crop_${k}`).oninput = () => {
+      const { N } = cr;
+      const val = (id) => +$(`#crop_${id}`).value / 100;
+      let { x, y, w, h } = cr.rect;
+      if (k === 'l') { const right = x + w; x = Math.min(val('l') * N.w, right - 8); w = right - x; }
+      if (k === 'r') { w = Math.max(8, N.w * (1 - val('r')) - x); }
+      if (k === 't') { const bottom = y + h; y = Math.min(val('t') * N.h, bottom - 8); h = bottom - y; }
+      if (k === 'b') { h = Math.max(8, N.h * (1 - val('b')) - y); }
+      cr.rect = { x, y, w, h };
+      if (cropAspect()) {
+        // keep the shape: the other side follows, centred
+        const a = cropAspect();
+        const kk = Math.abs(cr.img.scaleX) / Math.abs(cr.img.scaleY);
+        if (k === 'l' || k === 'r') { const nh = (w * kk) / a; cr.rect.y = y + h / 2 - nh / 2; cr.rect.h = nh; }
+        else { const nw = (a * h) / kk; cr.rect.x = x + w / 2 - nw / 2; cr.rect.w = nw; }
+        clampCropRect();
+      } else clampCropRect('keep');
+      placeCropBox();
+      updateCropSliders();
+    };
+  }
+  $('#cropReset').onclick = () => {
+    cr.ratio = 'free';
+    cr.rect = { x: 0, y: 0, w: cr.N.w, h: cr.N.h };
+    placeCropBox();
+    renderProps();
+  };
+  $('#cropDone').onclick = $('#cropDoneQ').onclick = () => finishCrop(true);
+  $('#cropCancel').onclick = $('#cropCancelQ').onclick = () => finishCrop(false);
+}
+function finishCrop(apply) {
+  const cr = state.crop;
+  if (!cr) return;
+  const c = state.canvas;
+  const { img, box, orig } = cr;
+  if (apply) syncCropFromBox();
+  const { x, y, w, h } = cr.rect;
+  const center = box.getCenterPoint();
+  state.crop = null;
+  state.loading = true;
+  c.remove(box);
+  c.uniformScaling = cr.uniform;
+  if (apply) {
+    img.set({ cropX: x, cropY: y, width: w, height: h });
+    img.setPositionByOrigin(center, 'center', 'center');
+    const cp = orig.clipPath;
+    if (cp) {
+      // keep a photo frame's shape, fitted to the new crop
+      cp.set({ scaleX: (cp.scaleX || 1) * (w / orig.width), scaleY: (cp.scaleY || 1) * (h / orig.height), left: 0, top: 0 });
+      img.clipPath = cp;
+    }
+  } else {
+    img.set({ cropX: orig.cropX, cropY: orig.cropY, width: orig.width, height: orig.height, left: orig.left, top: orig.top });
+    img.clipPath = orig.clipPath;
+  }
+  img.set({ selectable: orig.selectable !== false, evented: orig.evented !== false });
+  img.dirty = true;
+  img.setCoords();
+  state.loading = false;
+  if (c.getObjects().includes(img)) c.setActiveObject(img);
+  c.requestRenderAll();
+  if (apply) pushHistory();
+  schedulePersist();
+  renderProps();
+}
+function resetCrop(img) {
+  const N = imgNatural(img);
+  const center = img.getCenterPoint();
+  const off = imgVec(img, (img.cropX || 0) + img.width / 2 - N.w / 2, (img.cropY || 0) + img.height / 2 - N.h / 2);
+  const ow = img.width;
+  const oh = img.height;
+  img.set({ cropX: 0, cropY: 0, width: N.w, height: N.h });
+  img.setPositionByOrigin(center.subtract(off), 'center', 'center');
+  if (img.clipPath) img.clipPath.set({ scaleX: (img.clipPath.scaleX || 1) * (N.w / ow), scaleY: (img.clipPath.scaleY || 1) * (N.h / oh) });
+  img.dirty = true;
+  img.setCoords();
+  state.canvas.requestRenderAll();
+  pushHistory();
+  schedulePersist();
+  renderProps();
+}
+
+// ---------- Magic Write ----------
+const MW_TONES = ['Friendly', 'Professional', 'Fun', 'Persuasive'];
+const MW_LANGS = [['en', 'English'], ['zh', '中文'], ['ms', 'Melayu'], ['ta', 'தமிழ்'], ['id', 'Indonesia']];
+function magicWriteHTML() {
+  const mw = (state.mw ||= { prompt: '', tone: 'Friendly', lang: 'en', kind: 'headline', result: '' });
+  return `<section class="mw-box">
+    <h4>${icon('wand', 16)} Magic Write <small>free AI</small></h4>
+    <textarea id="mwPrompt" class="search" rows="2" maxlength="600" placeholder="Describe what to write, e.g. “a headline for a bakery's weekend sale”">${esc(mw.prompt)}</textarea>
+    <div class="mw-opts">
+      <select id="mwKind" title="Length"><option value="headline" ${mw.kind === 'headline' ? 'selected' : ''}>Headline</option><option value="paragraph" ${mw.kind === 'paragraph' ? 'selected' : ''}>Paragraph</option></select>
+      <select id="mwTone" title="Tone">${MW_TONES.map((t) => `<option ${t === mw.tone ? 'selected' : ''}>${t}</option>`).join('')}</select>
+      <select id="mwLang" title="Language">${MW_LANGS.map(([v, l]) => `<option value="${v}" ${v === mw.lang ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    </div>
+    <button class="btn primary block" id="mwGo">${icon('sparkle', 16)} Write for me</button>
+    <div id="mwOut">${mw.result ? mwResultHTML(mw.result) : ''}</div>
+  </section>`;
+}
+function mwResultHTML(text) {
+  return `<div class="mw-result"><p id="mwText">${esc(text)}</p>
+    <div class="row wrap"><button class="btn primary small" id="mwAdd">Add to page</button><button class="btn ghost small" id="mwReplace">Replace selected text</button><button class="btn ghost small" id="mwAgain">Try again</button></div></div>`;
+}
+async function magicWrite({ prompt, tone, lang, kind }) {
+  let r;
+  try {
+    r = await fetch('api/free-text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, tone, lang, kind }) });
+  } catch {
+    throw new Error(needsSite('Magic Write', "Couldn't reach the Artvas server. Check your internet connection and try again."));
+  }
+  const type = r.headers.get('content-type') || '';
+  if (!type.includes('json')) throw new Error(needsSite('Magic Write', 'Magic Write needs the Artvas server. Open Artvas from your Railway link (not a plain static copy).'));
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || !data.text) throw new Error(data.error || 'Magic Write could not write that. Try again.');
+  return data.text;
+}
+function bindMagicWrite(p) {
+  const mw = state.mw;
+  const read = () => Object.assign(mw, { prompt: $('#mwPrompt', p).value, tone: $('#mwTone', p).value, lang: $('#mwLang', p).value, kind: $('#mwKind', p).value });
+  ['mwPrompt', 'mwTone', 'mwLang', 'mwKind'].forEach((id) => ($('#' + id, p).onchange = read));
+  $('#mwPrompt', p).oninput = read;
+  const out = $('#mwOut', p);
+  const bindResult = () => {
+    if (!$('#mwAdd', out)) return;
+    $('#mwAdd', out).onclick = () => {
+      const head = mw.resultKind !== 'paragraph';
+      addText({ text: mw.result, size: head ? 0.065 : 0.034, weight: head ? '700' : '400' });
+    };
+    $('#mwReplace', out).onclick = () => {
+      const o = state.canvas.getActiveObject();
+      if (!o || !isText(o)) return toast('Select a text box on the page first');
+      setTextProp('text', mw.result);
+      toast('Text replaced');
+    };
+    $('#mwAgain', out).onclick = go;
+  };
+  const go = async () => {
+    read();
+    if (!mw.prompt.trim()) return toast('Describe what you want to write first');
+    const btn = $('#mwGo', p);
+    btn.disabled = true;
+    btn.textContent = 'Writing…';
+    out.innerHTML = '<p class="muted">Writing with free AI…</p>';
+    try {
+      mw.result = await magicWrite(mw);
+      mw.resultKind = mw.kind;
+      if (!out.isConnected) return;
+      out.innerHTML = mwResultHTML(mw.result);
+      bindResult();
+    } catch (e) {
+      if (out.isConnected) out.innerHTML = `<p class="mw-err">${esc(e.message)}</p>`;
+    } finally {
+      if (btn.isConnected) {
+        btn.disabled = false;
+        btn.innerHTML = `${icon('sparkle', 16)} Write for me`;
+      }
+    }
+  };
+  $('#mwGo', p).onclick = go;
+  bindResult();
+}
+
+// ---------- Panel bindings for all of the above ----------
+function bindExtras(o, text, img) {
+  const commit = () => { pushHistory(); schedulePersist(); };
+  if (text) {
+    const s = $('#pCurve');
+    if (s) {
+      s.oninput = () => { setCurve(text, +s.value); $('#pCurveV').textContent = s.value; $('#pCurve0').hidden = !+s.value; };
+      s.onchange = commit;
+      $('#pCurve0').onclick = () => { setCurve(text, 0); commit(); renderProps(); };
+    }
+  }
+  if (img) {
+    const crop = () => startCrop(img);
+    const b1 = $('#imgCrop');
+    if (b1) b1.onclick = crop;
+    const b2 = $('#qCrop');
+    if (b2) b2.onclick = crop;
+    const b3 = $('#imgCropReset');
+    if (b3) b3.onclick = () => resetCrop(img);
+    $$('[data-pcol]').forEach((b) => (b.onclick = () => { setBackgroundFill({ color: b.dataset.pcol }); toast('Page background changed'); }));
+    $$('[data-duo]').forEach((b) => (b.onclick = () => {
+      const p = DUO_PRESETS[+b.dataset.duo];
+      setDuotone(img, p?.dark, p?.light);
+      commit();
+      renderProps();
+    }));
+    const custom = () => setDuotone(img, $('#duoDark').value, $('#duoLight').value);
+    ['duoDark', 'duoLight'].forEach((id) => {
+      const e = $('#' + id);
+      if (!e) return;
+      e.oninput = custom;
+      e.onchange = () => { commit(); renderProps(); };
+    });
+  }
+  $$('[data-arr]').forEach((b) => (b.onclick = () => arrangeSelection(b.dataset.arr)));
+}
+
+installDesignExtras();
 window.addEventListener('beforeunload', () => { if (state.design) captureCurrentPage(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && state.design) persist(); });
 boot();
 
 // expose a tiny API for debugging/testing
-window.artvas = { video: _videoDebug, openVideo, pickVideoStarter, loadPack, state, addText, addShape, addImage, exportDesign, util, templateThumb, TEMPLATES, FORMATS };
+window.artvas = { video: _videoDebug, openVideo, pickVideoStarter, loadPack, state, addText, addShape, addImage, exportDesign, util, templateThumb, TEMPLATES, FORMATS, extras: { startCrop, finishCrop, setCrop: (r) => { if (state.crop) { state.crop.rect = { ...state.crop.rect, ...r }; clampCropRect(); placeCropBox(); } }, extractPalette, arrangeSelection, buildQR, addQR, setDuotone, curveLayout, ActiveSelection, duotoneClass: () => installDesignExtras.Duotone } };
 
 /** Put a file input made in code into the page (visually hidden) so phones open the picker. */
 function attachPicker(inp) {

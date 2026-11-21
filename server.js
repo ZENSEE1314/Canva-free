@@ -75,6 +75,56 @@ app.get('/api/free-image', async (req, res) => {
   res.status(last === 429 || last === 402 ? 429 : 502).json({ error: 'The free AI service is busy' });
 });
 
+// Free AI writing ("Magic Write") via Pollinations' free text service. Tries the OpenAI-style
+// endpoint first, then the simple GET endpoint. Short timeouts so the editor never hangs.
+const MW_TONES = ['Friendly', 'Professional', 'Fun', 'Persuasive'];
+const MW_LANGS = { en: 'English', zh: 'Simplified Chinese', ms: 'Malay (Bahasa Melayu)', ta: 'Tamil', id: 'Indonesian' };
+const cleanAIText = (t) => {
+  let s = String(t || '').replace(/\r/g, '');
+  s = s.split(/\n-{3,}\n|\n\*\*Sponsor|\n🌸/)[0]; // drop any appended notices
+  s = s.replace(/^```[a-z]*\n?|```$/g, '').replace(/^\s*(headline|paragraph|text)\s*[:：]\s*/i, '');
+  s = s.trim().replace(/^["“”'「『]+|["“”'」』]+$/g, '').replace(/\*\*/g, '').trim();
+  return s.slice(0, 800);
+};
+app.post('/api/free-text', express.json({ limit: '16kb' }), async (req, res) => {
+  const prompt = String(req.body?.prompt || '').trim().slice(0, 600);
+  if (!prompt) return res.status(400).json({ error: 'Describe what you want to write first.' });
+  const tone = MW_TONES.includes(req.body?.tone) ? req.body.tone : 'Friendly';
+  const lang = MW_LANGS[req.body?.lang] || 'English';
+  const kind = req.body?.kind === 'paragraph' ? 'paragraph' : 'headline';
+  const system =
+    `You write short copy for social media graphics, posters and flyers. Write in ${lang}. Use a ${tone.toLowerCase()} tone. ` +
+    (kind === 'headline' ? 'Write ONE short, catchy headline of at most 10 words.' : 'Write ONE short paragraph of at most 45 words.') +
+    ' Reply with the text only: no quotes, no labels, no explanations, no markdown, no emojis unless asked.';
+  const headers = { 'User-Agent': 'Artvas/1.0' };
+  let text = '';
+  try {
+    const r = await fetch('https://text.pollinations.ai/openai', {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'openai', private: true, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (r.ok) {
+      const data = await r.json().catch(() => null);
+      text = cleanAIText(data?.choices?.[0]?.message?.content);
+    }
+  } catch {}
+  if (!text) {
+    try {
+      const url = `https://text.pollinations.ai/${encodeURIComponent(`${system}\n\n${prompt}`)}?model=openai&private=true`;
+      const r = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
+      const type = r.headers.get('content-type') || '';
+      if (r.ok && !type.includes('html')) {
+        const body = await r.text();
+        text = cleanAIText(type.includes('json') ? JSON.parse(body)?.choices?.[0]?.message?.content || '' : body);
+      }
+    } catch {}
+  }
+  if (!text) return res.status(502).json({ error: 'The free AI writer is busy or unreachable right now. Try again in a minute.' });
+  res.json({ text });
+});
+
 // ---- Online voices (Microsoft Edge "Read Aloud" neural voices, free) ----
 // Chinese, Malay, Tamil, Indonesian, English and many more. Returns MP3 audio plus sentence timings.
 const ttsAgent = process.env.HTTPS_PROXY ? new HttpsProxyAgent(process.env.HTTPS_PROXY) : undefined;
