@@ -1119,3 +1119,481 @@ export function bindCardPreview(card, draw, { w = 120, h = 160 } = {}) {
   card.addEventListener('blur', stop);
   return stop;
 }
+
+// ---------- masks, looks and blend modes (clips and picture-in-picture layers) ----------
+/** One reusable canvas per name; it is resized (and so cleared) only when the size changes. */
+const layers = new Map();
+export function layerCanvas(name, w, h) {
+  w = Math.max(1, Math.round(w));
+  h = Math.max(1, Math.round(h));
+  let c = layers.get(name);
+  if (!c) {
+    c = document.createElement('canvas');
+    layers.set(name, c);
+  }
+  if (c.width !== w || c.height !== h) {
+    c.width = w;
+    c.height = h;
+  }
+  const g = c.getContext('2d');
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalAlpha = 1;
+  g.globalCompositeOperation = 'source-over';
+  g.filter = 'none';
+  g.shadowBlur = 0;
+  g.clearRect(0, 0, w, h);
+  return [c, g];
+}
+
+export const MASKS = [
+  ['none', 'None'], ['circle', 'Circle'], ['rect', 'Rectangle'], ['heart', 'Heart'], ['star', 'Star'], ['linear', 'Linear'], ['mirror', 'Mirror'],
+];
+/** Small line icons (24×24) for the mask picker. */
+export const MASK_ICONS = {
+  none: '<circle cx="12" cy="12" r="8"/><path d="M6.5 17.5l11-11"/>',
+  circle: '<circle cx="12" cy="12" r="8"/>',
+  rect: '<rect x="4" y="6" width="16" height="12" rx="3"/>',
+  heart: '<path d="M12 19.5s-7.5-4.6-7.5-10a4 4 0 0 1 7.5-2 4 4 0 0 1 7.5 2c0 5.4-7.5 10-7.5 10z"/>',
+  star: '<path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.8z"/>',
+  linear: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 12h16"/><path d="M4 16h16M4 20h16" opacity=".45"/>',
+  mirror: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9h16M4 15h16"/>',
+};
+export const maskIcon = (id, size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round">${MASK_ICONS[id] || ''}</svg>`;
+export const DEFAULT_MASK = { type: 'none', x: 0, y: 0, size: 0.7, aspect: 1, round: 0.2, feather: 0, rot: 0, invert: false };
+export const isMasked = (m) => !!(m && m.type && m.type !== 'none');
+
+/** Trace the mask outline around (0,0) in mask space; u is the unit length (shorter side). */
+function maskPath(g, m, u) {
+  const s = (m.size ?? 0.7) * u;
+  const ar = clamp(m.aspect ?? 1, 0.2, 5);
+  const big = u * 40;
+  g.beginPath();
+  switch (m.type) {
+    case 'circle':
+      g.ellipse(0, 0, Math.max(0.5, (s * ar) / 2), Math.max(0.5, s / 2), 0, 0, Math.PI * 2);
+      break;
+    case 'rect': {
+      const w = s * ar;
+      const r = clamp(m.round ?? 0, 0, 1) * Math.min(w, s) * 0.5;
+      g.roundRect(-w / 2, -s / 2, w, s, r);
+      break;
+    }
+    case 'heart': {
+      // two lobes and a point, drawn as one smooth outline (height s, width s * ar)
+      const hx = (s * ar) / 2;
+      const top = -s * 0.28;
+      g.moveTo(0, top);
+      g.bezierCurveTo(-hx * 0.15, -s * 0.52, -hx * 1.02, -s * 0.55, -hx, -s * 0.12);
+      g.bezierCurveTo(-hx * 0.98, s * 0.16, -hx * 0.45, s * 0.3, 0, s * 0.5);
+      g.bezierCurveTo(hx * 0.45, s * 0.3, hx * 0.98, s * 0.16, hx, -s * 0.12);
+      g.bezierCurveTo(hx * 1.02, -s * 0.55, hx * 0.15, -s * 0.52, 0, top);
+      g.closePath();
+      break;
+    }
+    case 'star': {
+      const R = s / 2;
+      const ri = R * 0.42;
+      for (let i = 0; i < 10; i++) {
+        const a = -Math.PI / 2 + (i * Math.PI) / 5;
+        const r = i % 2 ? ri : R;
+        const x = Math.cos(a) * r * ar;
+        const y = Math.sin(a) * r + R * 0.1;
+        if (i) g.lineTo(x, y);
+        else g.moveTo(x, y);
+      }
+      g.closePath();
+      break;
+    }
+    case 'linear':
+      // keep everything below the line
+      g.rect(-big, 0, big * 2, big);
+      break;
+    case 'mirror':
+      // keep a band of height s across the picture
+      g.rect(-big, -s / 2, big * 2, s);
+      break;
+  }
+}
+
+/**
+ * Cut a layer canvas to a mask shape. T maps mask space (centred on the shape) to the layer's
+ * pixels; u is the unit length in mask space. Feather softens the edge with a blur.
+ */
+export function maskLayer(layer, m, T, u) {
+  const w = layer.width;
+  const h = layer.height;
+  const [mc, mg] = layerCanvas('maskShape', w, h);
+  const px = Math.hypot(T.a, T.b) || 1;
+  const f = clamp(m.feather || 0, 0, 1) * u * 0.18 * px;
+  if (m.invert) {
+    mg.fillStyle = '#fff';
+    mg.fillRect(0, 0, w, h);
+    mg.globalCompositeOperation = 'destination-out';
+  }
+  mg.setTransform(T);
+  if (f >= 0.5) mg.filter = `blur(${f.toFixed(1)}px)`;
+  mg.fillStyle = '#fff';
+  maskPath(mg, m, u);
+  mg.fill();
+  const lg = layer.getContext('2d');
+  lg.save();
+  lg.setTransform(1, 0, 0, 1, 0, 0);
+  lg.globalAlpha = 1;
+  lg.filter = 'none';
+  lg.globalCompositeOperation = 'destination-in';
+  lg.drawImage(mc, 0, 0);
+  lg.restore();
+}
+
+/** Outline of a mask for the on-canvas guide while editing. */
+export function strokeMaskGuide(g, m, T, u) {
+  g.save();
+  g.setTransform(T);
+  maskPath(g, m, u);
+  const px = Math.hypot(T.a, T.b) || 1;
+  g.lineWidth = 2 / px;
+  g.setLineDash([6 / px, 5 / px]);
+  g.strokeStyle = 'rgba(255,255,255,.9)';
+  g.shadowColor = 'rgba(0,0,0,.6)';
+  g.shadowBlur = 3;
+  g.stroke();
+  g.restore();
+}
+
+export const BLEND_MODES = [
+  ['normal', 'Normal'], ['multiply', 'Multiply'], ['screen', 'Screen'], ['overlay', 'Overlay'], ['darken', 'Darken'], ['lighten', 'Lighten'],
+  ['color-dodge', 'Color dodge'], ['color-burn', 'Color burn'], ['hard-light', 'Hard light'], ['soft-light', 'Soft light'], ['difference', 'Difference'],
+  ['exclusion', 'Exclusion'], ['hue', 'Hue'], ['saturation', 'Saturation'], ['color', 'Color'], ['luminosity', 'Luminosity'],
+];
+export const blendOp = (id) => (id && id !== 'normal' && BLEND_MODES.some(([b]) => b === id) ? id : 'source-over');
+
+/** Colour looks that a CSS filter can't do: temperature, tint, fade, vignette and sharpen. */
+export const LOOK_KEYS = ['temp', 'tint', 'fade', 'vignette', 'sharpen'];
+export const hasLook = (k) => !!k && LOOK_KEYS.some((key) => Math.abs(k[key] || 0) > 0.005);
+
+/**
+ * Apply a look to a layer that holds one clip. T0 maps frame coordinates (W×H) to the layer's
+ * pixels. Tints are drawn over the whole layer, then the clip's own alpha is put back so they
+ * stay inside the picture.
+ */
+export function applyLook(layer, k, T0, W, H) {
+  const w = layer.width;
+  const h = layer.height;
+  const lg = layer.getContext('2d');
+  const [ac, ag] = layerCanvas('lookAlpha', w, h);
+  ag.drawImage(layer, 0, 0);
+  lg.save();
+  lg.setTransform(1, 0, 0, 1, 0, 0);
+  lg.globalAlpha = 1;
+  lg.filter = 'none';
+  const sharp = clamp(k.sharpen || 0, 0, 1);
+  if (sharp > 0.005) {
+    // high-pass detail (0.5 + (image - blurred) / 2) laid over the picture with overlay
+    const [sc, sg] = layerCanvas('lookSharp', w, h);
+    sg.fillStyle = '#808080';
+    sg.fillRect(0, 0, w, h);
+    sg.filter = `blur(${Math.max(1, Math.min(w, h) / 500).toFixed(1)}px) invert(1)`;
+    sg.drawImage(layer, 0, 0);
+    sg.filter = 'none';
+    sg.globalAlpha = 0.5;
+    sg.drawImage(layer, 0, 0);
+    lg.globalCompositeOperation = 'overlay';
+    lg.globalAlpha = sharp;
+    lg.drawImage(sc, 0, 0);
+    lg.globalAlpha = 1;
+  }
+  const fill = (op, color, a) => {
+    if (a <= 0.003) return;
+    lg.globalCompositeOperation = op;
+    lg.globalAlpha = clamp(a, 0, 1);
+    lg.fillStyle = color;
+    lg.fillRect(0, 0, w, h);
+  };
+  const temp = clamp(k.temp || 0, -1, 1);
+  if (temp > 0) fill('soft-light', '#ff8a1f', temp * 0.75);
+  else if (temp < 0) fill('soft-light', '#1f7bff', -temp * 0.75);
+  if (temp) fill('color', temp > 0 ? '#ffb36b' : '#6bb0ff', Math.abs(temp) * 0.08);
+  const tint = clamp(k.tint || 0, -1, 1);
+  if (tint > 0) fill('soft-light', '#ff2bd6', tint * 0.6);
+  else if (tint < 0) fill('soft-light', '#2bff6a', -tint * 0.6);
+  const fade = clamp(k.fade || 0, -1, 1);
+  if (fade > 0) {
+    // lift the blacks and soften the highlights a little
+    fill('screen', '#4a4a52', fade);
+    fill('multiply', '#ececec', fade * 0.6);
+  }
+  const vig = clamp(k.vignette || 0, 0, 1);
+  if (vig > 0.005) {
+    lg.setTransform(T0);
+    lg.globalCompositeOperation = 'source-over';
+    lg.globalAlpha = 1;
+    const r = lg.createRadialGradient(W / 2, H / 2, Math.min(W, H) * (0.45 - vig * 0.2), W / 2, H / 2, Math.hypot(W, H) * 0.55);
+    r.addColorStop(0, 'rgba(0,0,0,0)');
+    r.addColorStop(1, `rgba(0,0,0,${(0.35 + vig * 0.55).toFixed(3)})`);
+    lg.fillStyle = r;
+    lg.fillRect(-W, -H, W * 3, H * 3);
+    lg.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  lg.globalAlpha = 1;
+  lg.globalCompositeOperation = 'destination-in';
+  lg.drawImage(ac, 0, 0);
+  lg.restore();
+}
+
+// ---------- voice changer ----------
+export const VOICE_FX = [
+  ['chipmunk', 'Chipmunk'], ['deep', 'Deep'], ['robot', 'Robot'], ['echo', 'Echo'], ['telephone', 'Telephone'],
+  ['megaphone', 'Megaphone'], ['monster', 'Monster'], ['cave', 'Cave reverb'], ['radio', 'Radio'], ['underwater', 'Underwater'],
+];
+export const voiceName = (id) => VOICE_FX.find(([v]) => v === id)?.[1] || 'Original';
+const VOICE_PITCH = { chipmunk: 1.6, deep: 0.76, monster: 0.62 };
+
+/**
+ * Change pitch and/or tempo with overlapping windowed grains (time-domain overlap-add).
+ * pitch > 1 raises the voice; speed > 1 makes it shorter. Both are independent.
+ */
+function grainShift(x, pitch, speed, sr) {
+  const N = Math.max(256, Math.round(sr * 0.046) & ~1);
+  const hop = N >> 2;
+  const outLen = Math.max(1, Math.round(x.length / speed));
+  const out = new Float32Array(outLen);
+  const wsum = new Float32Array(outLen);
+  const win = new Float32Array(N);
+  for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (N - 1));
+  const span = N * pitch;
+  for (let o = -N; o < outLen; o += hop) {
+    const centre = (o + N / 2) * speed;
+    const start = centre - span / 2;
+    for (let i = 0; i < N; i++) {
+      const j = o + i;
+      if (j < 0 || j >= outLen) continue;
+      const p = start + i * pitch;
+      const k = Math.floor(p);
+      if (k < 0 || k + 1 >= x.length) continue;
+      const fr = p - k;
+      out[j] += win[i] * (x[k] + (x[k + 1] - x[k]) * fr);
+      wsum[j] += win[i];
+    }
+  }
+  for (let j = 0; j < outLen; j++) out[j] = wsum[j] > 1e-3 ? out[j] / Math.max(wsum[j], 0.35) : 0;
+  return out;
+}
+
+function shaperCurve(amount) {
+  const n = 1024;
+  const c = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    c[i] = ((1 + amount) * x) / (1 + amount * Math.abs(x));
+  }
+  return c;
+}
+function impulse(ctx, secs, decay, seed = 1) {
+  const len = Math.round(ctx.sampleRate * secs);
+  const b = ctx.createBuffer(2, len, ctx.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = b.getChannelData(ch);
+    for (let i = 0; i < len; i++) d[i] = (hr(i * 0.7 + ch * 9137 + seed) * 2 - 1) * Math.pow(1 - i / len, decay);
+  }
+  return b;
+}
+
+/** Encode an AudioBuffer as a 16-bit PCM WAV file. */
+export function encodeWav(buf) {
+  const ch = buf.numberOfChannels;
+  const n = buf.length;
+  const sr = buf.sampleRate;
+  const data = new DataView(new ArrayBuffer(44 + n * ch * 2));
+  const str = (o, s) => [...s].forEach((c, i) => data.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF');
+  data.setUint32(4, 36 + n * ch * 2, true);
+  str(8, 'WAVE');
+  str(12, 'fmt ');
+  data.setUint32(16, 16, true);
+  data.setUint16(20, 1, true);
+  data.setUint16(22, ch, true);
+  data.setUint32(24, sr, true);
+  data.setUint32(28, sr * ch * 2, true);
+  data.setUint16(32, ch * 2, true);
+  data.setUint16(34, 16, true);
+  str(36, 'data');
+  data.setUint32(40, n * ch * 2, true);
+  const chans = [...Array(ch)].map((_, i) => buf.getChannelData(i));
+  let o = 44;
+  for (let i = 0; i < n; i++) {
+    for (let c = 0; c < ch; c++) {
+      const v = clamp(chans[c][i], -1, 1);
+      data.setInt16(o, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+      o += 2;
+    }
+  }
+  return new Blob([data.buffer], { type: 'audio/wav' });
+}
+
+/**
+ * Render a voice effect offline. src is the encoded media (audio or video file); from/to pick
+ * the part to use (seconds); speed > 1 also shortens it without changing the pitch (to match a
+ * sped-up clip). Returns a WAV blob and its length in seconds.
+ */
+export async function changeVoice(src, preset, { from = 0, to = Infinity, speed = 1, onStep = () => {} } = {}) {
+  const sr = 44100;
+  onStep('Reading the sound…');
+  const dec = await new OfflineAudioContext(1, 1, sr).decodeAudioData(src);
+  const a = clamp(Math.floor(from * sr), 0, dec.length);
+  const b = clamp(Math.floor((Number.isFinite(to) ? to : dec.duration) * sr), a + 1, dec.length);
+  if (b - a < sr * 0.05) throw new Error('too short');
+  const chs = Math.min(2, dec.numberOfChannels);
+  onStep('Changing the voice…');
+  await new Promise((r) => setTimeout(r, 0));
+  const pitch = VOICE_PITCH[preset] || 1;
+  let peakIn = 0;
+  const chans = [];
+  for (let c = 0; c < chs; c++) {
+    let x = dec.getChannelData(c).slice(a, b);
+    for (let i = 0; i < x.length; i++) peakIn = Math.max(peakIn, Math.abs(x[i]));
+    if (pitch !== 1 || speed !== 1) x = grainShift(x, pitch, speed, sr);
+    chans.push(x);
+  }
+  const len = chans[0].length;
+  const ctx = new OfflineAudioContext(chs, len, sr);
+  const buf = ctx.createBuffer(chs, len, sr);
+  chans.forEach((x, c) => buf.copyToChannel(x, c));
+  const s = ctx.createBufferSource();
+  s.buffer = buf;
+  const out = ctx.createGain();
+  out.connect(ctx.destination);
+  const filt = (type, f, q = 0.7, gain = 0) => {
+    const n = ctx.createBiquadFilter();
+    n.type = type;
+    n.frequency.value = f;
+    n.Q.value = q;
+    n.gain.value = gain;
+    return n;
+  };
+  const shaper = (amt) => {
+    const n = ctx.createWaveShaper();
+    n.curve = shaperCurve(amt);
+    n.oversample = '2x';
+    return n;
+  };
+  const gain = (v) => {
+    const n = ctx.createGain();
+    n.gain.value = v;
+    return n;
+  };
+  const chain = (...nodes) => {
+    for (let i = 0; i < nodes.length - 1; i++) nodes[i].connect(nodes[i + 1]);
+    return nodes[nodes.length - 1];
+  };
+  switch (preset) {
+    case 'chipmunk':
+      chain(s, filt('highpass', 180), filt('highshelf', 4000, 0.7, 3), out);
+      break;
+    case 'deep':
+      chain(s, filt('lowshelf', 220, 0.7, 5), filt('lowpass', 6000), out);
+      break;
+    case 'monster': {
+      chain(s, shaper(6), filt('lowshelf', 160, 0.7, 7), filt('lowpass', 2600), gain(0.75), out);
+      // a second voice an octave-ish lower for growl
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 30;
+      const am = gain(0.5);
+      const depth = gain(0.35);
+      lfo.connect(depth).connect(am.gain);
+      chain(s, filt('lowpass', 900), am, gain(0.5), out);
+      lfo.start();
+      break;
+    }
+    case 'robot': {
+      // ring modulation plus a short metallic comb
+      const ring = gain(0);
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = 60;
+      osc.connect(ring.gain);
+      osc.start();
+      s.connect(ring);
+      const d = ctx.createDelay(0.05);
+      d.delayTime.value = 0.011;
+      const fb = gain(0.55);
+      ring.connect(d);
+      d.connect(fb).connect(d);
+      const mix = gain(1);
+      ring.connect(mix);
+      d.connect(gain(0.6)).connect(mix);
+      s.connect(gain(0.12)).connect(mix);
+      chain(mix, filt('highpass', 120), gain(1.3), out);
+      break;
+    }
+    case 'echo': {
+      s.connect(out);
+      const d = ctx.createDelay(1);
+      d.delayTime.value = 0.28;
+      const fb = gain(0.42);
+      s.connect(d);
+      d.connect(filt('lowpass', 3500)).connect(fb).connect(d);
+      d.connect(gain(0.55)).connect(out);
+      break;
+    }
+    case 'telephone':
+      chain(s, filt('highpass', 450, 0.9), filt('highpass', 450, 0.9), filt('lowpass', 3000, 0.9), filt('lowpass', 3000, 0.9), filt('peaking', 1600, 1, 6), shaper(3), gain(0.9), out);
+      break;
+    case 'megaphone':
+      chain(s, filt('highpass', 650, 1), filt('lowpass', 3000, 1), filt('peaking', 1900, 1.4, 10), shaper(18), filt('lowpass', 4200), gain(0.55), out);
+      break;
+    case 'radio': {
+      chain(s, filt('highpass', 320, 0.8), filt('lowpass', 3600, 0.8), filt('peaking', 1200, 0.8, 4), shaper(5), gain(0.85), out);
+      // soft static
+      const nb = ctx.createBuffer(1, len, sr);
+      const nd = nb.getChannelData(0);
+      for (let i = 0; i < len; i++) nd[i] = hr(i * 1.37) * 2 - 1;
+      const ns = ctx.createBufferSource();
+      ns.buffer = nb;
+      chain(ns, filt('bandpass', 2500, 0.6), gain(0.035), out);
+      ns.start();
+      break;
+    }
+    case 'cave': {
+      const conv = ctx.createConvolver();
+      conv.buffer = impulse(ctx, 2.6, 3.2);
+      s.connect(gain(0.75)).connect(out);
+      const pre = ctx.createDelay(0.2);
+      pre.delayTime.value = 0.04;
+      chain(s, pre, conv, filt('lowpass', 4500), gain(0.55), out);
+      break;
+    }
+    case 'underwater': {
+      // muffled, wobbling (vibrato through a modulated delay) and a little bubbly
+      const d = ctx.createDelay(0.05);
+      d.delayTime.value = 0.012;
+      const lfo = ctx.createOscillator();
+      lfo.frequency.value = 3.2;
+      const depth = gain(0.004);
+      lfo.connect(depth).connect(d.delayTime);
+      lfo.start();
+      const conv = ctx.createConvolver();
+      conv.buffer = impulse(ctx, 0.6, 2, 7);
+      const lp = chain(s, filt('lowpass', 520, 3), filt('lowpass', 900, 0.7), d);
+      lp.connect(gain(1.4)).connect(out);
+      lp.connect(conv).connect(gain(0.35)).connect(out);
+      break;
+    }
+    default:
+      s.connect(out);
+  }
+  s.start();
+  const res = await ctx.startRendering();
+  // match the loudness peak of the original (never clip)
+  let peak = 0;
+  for (let c = 0; c < res.numberOfChannels; c++) {
+    const d = res.getChannelData(c);
+    for (let i = 0; i < d.length; i++) peak = Math.max(peak, Math.abs(d[i]));
+  }
+  const k = peak > 1e-4 ? Math.min(0.98, Math.max(peakIn, 0.3)) / peak : 1;
+  if (Math.abs(k - 1) > 0.01) for (let c = 0; c < res.numberOfChannels; c++) {
+    const d = res.getChannelData(c);
+    for (let i = 0; i < d.length; i++) d[i] *= k;
+  }
+  onStep('Saving…');
+  return { blob: encodeWav(res), duration: res.length / sr };
+}

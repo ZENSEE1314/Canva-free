@@ -1,0 +1,26 @@
+/* Video editor extras: mask picker, voice changer, look sliders. */
+.mask-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.mask-grid button {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  border: 1px solid var(--line); background: #fff; border-radius: 8px;
+  padding: 7px 2px 5px; font-size: 11px; color: var(--ink-2); cursor: pointer; min-height: 48px;
+}
+.mask-grid button svg { display: block; }
+.mask-grid button:hover { border-color: var(--brand); }
+.mask-grid button.on { border-color: var(--brand); background: var(--brand-soft); color: var(--brand); font-weight: 600; }
+.mask-opts { margin-top: 8px; }
+.mask-opts .frow b, .frow b { font-weight: 600; color: var(--brand); margin-left: 4px; }
+.mask-opts .row { gap: 10px; align-items: center; }
+.voice-grid button[disabled] { opacity: 0.55; cursor: progress; }
+.vc-status { min-height: 1.2em; margin: 6px 0 0; font-size: 12px; }
+.vc-status:empty { display: none; }
+/* centred sliders (temperature, tint) get a small centre tick */
+.frow input.mid {
+  background: linear-gradient(var(--line), var(--line)) center / 2px 8px no-repeat;
+}
+@media (max-width: 760px) {
+  .mask-grid { grid-template-columns: repeat(4, 1fr); }
+  .mask-grid button { min-height: 52px; font-size: 11px; }
+  .voice-grid button { min-height: 38px; }
+}
+.mask-opts label.row { font-size: 13px; }

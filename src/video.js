@@ -2,6 +2,7 @@
 // Clips play in sequence on the main track; text, stickers and images float on overlay tracks;
 // music and voice-overs sit on audio tracks. Everything is drawn into one canvas, which is also
 // what gets recorded on export (with the mixed audio).
+import './video-extra.css';
 import { saveDesign, getMedia, saveMedia, uid } from './storage.js';
 import { videoMime } from './animate.js';
 import { loadPack, flatSrc, PACK_CATS } from './library.js';
@@ -12,7 +13,7 @@ import { transcribeMedia, scriptToLines } from './captions.js';
 import { MUSIC_STYLES, SFX, renderMusic, renderSfx } from './music.js';
 import { VOICES, speak, ONLINE_LANGS, speakOnline, faceFor } from './tts.js';
 import { fontsIn } from './fonts.js';
-import { VIDEO_FX, BODY_FX, FX_CATS, COLOR_FX, fxName, applyVideoFx, applyBodyFx, segmentCanvas, loadSegmenter, segState, fxThumb, loadFxSamples, fxSamplesReady, drawSample, drawFxFrame, bindCardPreview } from './vfx.js';
+import { VIDEO_FX, BODY_FX, FX_CATS, COLOR_FX, fxName, applyVideoFx, applyBodyFx, segmentCanvas, loadSegmenter, segState, fxThumb, loadFxSamples, fxSamplesReady, drawSample, drawFxFrame, bindCardPreview, layerCanvas, MASKS, maskIcon, DEFAULT_MASK, isMasked, maskLayer, strokeMaskGuide, BLEND_MODES, blendOp, LOOK_KEYS, hasLook, applyLook, VOICE_FX, voiceName, changeVoice } from './vfx.js';
 import { needsSite, inPreview as IN_PREVIEW } from './env.js';
 
 export const VIDEO_PRESETS = [
@@ -99,7 +100,34 @@ const FILTERS = [
   { id: 'vintage', label: 'Vintage', f: { sepia: 0.45, contrast: 0.9, brightness: 1.05, saturate: 0.85 } },
   { id: 'fade', label: 'Faded', f: { contrast: 0.8, brightness: 1.1, saturate: 0.8 } },
   { id: 'drama', label: 'Dramatic', f: { contrast: 1.35, brightness: 0.92, saturate: 1.1 } },
+  // temp / tint / fade / vignette are drawn as colour layers (see applyLook in vfx.js)
+  { id: 'warmfilm', label: 'Warm film', f: { sepia: 0.18, contrast: 0.95, saturate: 1.05, temp: 0.35, fade: 0.25 } },
+  { id: 'coolblue', label: 'Cool blue', f: { saturate: 0.95, brightness: 1.02, temp: -0.55 } },
+  { id: 'tealorange', label: 'Teal & orange', f: { contrast: 1.12, saturate: 1.2, temp: 0.25, tint: -0.25, hue: -6 } },
+  { id: 'golden', label: 'Golden hour', f: { brightness: 1.05, saturate: 1.25, sepia: 0.12, temp: 0.6, vignette: 0.25 } },
+  { id: 'moody', label: 'Moody', f: { brightness: 0.88, contrast: 1.15, saturate: 0.7, temp: -0.2, vignette: 0.55 } },
+  { id: 'matte', label: 'Fade matte', f: { contrast: 0.88, saturate: 0.85, fade: 0.6 } },
+  { id: 'noir', label: 'Noir', f: { grayscale: 1, contrast: 1.5, brightness: 0.9, vignette: 0.6 } },
+  { id: 'highkey', label: 'High key', f: { brightness: 1.25, contrast: 0.85, saturate: 0.9, fade: 0.15 } },
+  { id: 'lowkey', label: 'Low key', f: { brightness: 0.75, contrast: 1.35, saturate: 0.9, vignette: 0.45 } },
+  { id: 'pastel', label: 'Pastel', f: { brightness: 1.1, contrast: 0.85, saturate: 0.7, tint: 0.15, fade: 0.35 } },
+  { id: 'pop', label: 'Vivid pop', f: { saturate: 1.8, contrast: 1.2, brightness: 1.03 } },
+  { id: 'sunset', label: 'Sunset', f: { saturate: 1.3, hue: -10, temp: 0.5, tint: 0.3 } },
+  { id: 'forest', label: 'Forest', f: { saturate: 1.15, hue: 8, contrast: 1.05, tint: -0.4, temp: -0.1 } },
+  { id: 'rose', label: 'Rose', f: { saturate: 1.05, brightness: 1.05, tint: 0.5, temp: 0.15 } },
+  { id: 'retro70', label: 'Retro 70s', f: { sepia: 0.35, saturate: 1.3, contrast: 0.9, temp: 0.3, fade: 0.4, hue: -8 } },
+  { id: 'cyber', label: 'Cyber', f: { saturate: 1.5, contrast: 1.2, hue: 15, temp: -0.5, tint: 0.45 } },
+  { id: 'chrome', label: 'Chrome', f: { saturate: 0.6, contrast: 1.3, brightness: 1.05, temp: -0.15 } },
+  { id: 'cinema', label: 'Cinematic', f: { contrast: 1.18, saturate: 0.9, temp: 0.1, tint: -0.12, fade: 0.15, vignette: 0.4 } },
 ];
+/** Look values (temperature, tint, fade, vignette, sharpen) of a clip: its filter plus its own sliders. */
+function lookOf(c) {
+  const f = FILTERS.find((x) => x.id === c.filter)?.f || {};
+  const a = c.adjust || {};
+  const k = {};
+  for (const key of LOOK_KEYS) k[key] = (f[key] || 0) + (a[key] || 0);
+  return k;
+}
 const TRANSITIONS = [
   ['none', 'None'], ['fade', 'Crossfade'], ['black', 'Dip to black'], ['white', 'Flash'], ['slide', 'Slide'], ['up', 'Push up'], ['zoom', 'Zoom'], ['zoomblur', 'Zoom blur'],
   ['wipe', 'Wipe'], ['iris', 'Circle'], ['spin', 'Spin'], ['glitch', 'Glitch'], ['blur', 'Blur'],
@@ -324,12 +352,16 @@ async function elFor(clip) {
 }
 async function audioElFor(a) {
   let el = V.aels.get(a.id);
-  if (el) return el;
+  if (el && el._media === a.mediaId) return el;
+  // the track now points at other media (voice changer, undo): drop the old element
+  if (el) dropEl(V.aels, a.id);
   const url = await mediaURL(a.mediaId);
   if (!url) return null;
+  if (V.aels.get(a.id)?._media === a.mediaId) return V.aels.get(a.id);
   el = document.createElement('audio');
   el.preload = 'auto';
   el.src = url;
+  el._media = a.mediaId;
   wireAudio(el);
   V.aels.set(a.id, el);
   return el;
@@ -444,7 +476,38 @@ function overlayImg(o) {
   return img;
 }
 
-function drawMedia(g, el, c, W, Hh, { alpha = 1, dx = 0, dy = 0, scale = 1, blur = 0, rot = 0, local = 0 } = {}) {
+/**
+ * Draw one main-track clip. Clips with a mask or a colour look are drawn on a layer first,
+ * then cut / tinted there and put on the frame with the clip's opacity.
+ */
+function drawMedia(g, el, c, W, Hh, o = {}) {
+  const alpha = (o.alpha ?? 1) * clamp(c.opacity ?? 1, 0, 1);
+  const mask = c.type !== 'color' && isMasked(c.mask) ? c.mask : null;
+  const look = c.type !== 'color' ? lookOf(c) : null;
+  if (!mask && !hasLook(look)) return drawMediaRaw(g, el, c, W, Hh, { ...o, alpha });
+  if (!el || alpha <= 0) return;
+  const T0 = g.getTransform();
+  const [lc, lg] = layerCanvas('clipLayer', g.canvas.width, g.canvas.height);
+  lg.setTransform(T0);
+  let T = null;
+  drawMediaRaw(lg, el, c, W, Hh, { ...o, alpha: 1, onSpace: (m) => (T = m) });
+  if (!T) return;
+  if (hasLook(look)) applyLook(lc, look, T0, W, Hh);
+  if (mask) maskLayer(lc, mask, maskMatrix(T, mask, W, Hh), Math.min(W, Hh));
+  g.save();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalAlpha = alpha;
+  g.filter = 'none';
+  g.drawImage(lc, 0, 0);
+  g.restore();
+  if (mask && g === V.g && !V.playing && V.sel?.kind === 'clip' && V.sel.id === c.id) strokeMaskGuide(g, mask, maskMatrix(T, mask, W, Hh), Math.min(W, Hh));
+}
+/** Mask space of a clip: the clip's position and rotation, then the mask's own offset and angle. */
+function maskMatrix(T, m, W, Hh) {
+  return T.translate((m.x || 0) * W * 0.5, (m.y || 0) * Hh * 0.5).rotate(m.rot || 0);
+}
+
+function drawMediaRaw(g, el, c, W, Hh, { alpha = 1, dx = 0, dy = 0, scale = 1, blur = 0, rot = 0, local = 0, onSpace = null } = {}) {
   if (c.type === 'color') {
     g.save();
     g.globalAlpha = alpha;
@@ -470,8 +533,12 @@ function drawMedia(g, el, c, W, Hh, { alpha = 1, dx = 0, dy = 0, scale = 1, blur
   if (!sw || !sh) return;
   if (el instanceof HTMLVideoElement && el.readyState < 2) return;
   const [ew, eh] = quarter ? [sh, sw] : [sw, sh];
-  const cover = Math.max(W / ew, Hh / eh);
-  const contain = Math.min(W / ew, Hh / eh);
+  // free rotation: fill = the turned picture still covers the frame, fit = all of it stays visible
+  const fr = ((tf.r || 0) * Math.PI) / 180;
+  const ca = Math.abs(Math.cos(fr));
+  const sa = Math.abs(Math.sin(fr));
+  const cover = Math.max((W * ca + Hh * sa) / ew, (W * sa + Hh * ca) / eh);
+  const contain = Math.min(W / (ew * ca + eh * sa), Hh / (ew * sa + eh * ca));
   const filt = filterString(c);
   // clip effects
   const fx = clipEffect(c, local, W, Hh);
@@ -490,7 +557,8 @@ function drawMedia(g, el, c, W, Hh, { alpha = 1, dx = 0, dy = 0, scale = 1, blur
   }
   const s0 = (c.fit === 'fit' ? contain : cover) * (tf.zoom || 1);
   g.translate((tf.x || 0) * W * 0.5, (tf.y || 0) * Hh * 0.5);
-  g.rotate(((tf.rot || 0) * Math.PI) / 180);
+  g.rotate((((tf.rot || 0) + (tf.r || 0)) * Math.PI) / 180);
+  if (onSpace) onSpace(g.getTransform());
   g.scale(tf.fx ? -1 : 1, tf.fy ? -1 : 1);
   const bl = blur + fx.blur;
   g.filter = bl ? `${filt === 'none' ? '' : filt} blur(${bl}px)` : filt;
@@ -899,6 +967,30 @@ function chromaKey(src, hex, tol) {
   return keyCanvas;
 }
 
+/** Draw a picture-in-picture image/video at (-w/2, -h/2), cut to its mask when it has one. */
+function drawOverlayMedia(g, o, src, w, h) {
+  const m = isMasked(o.mask) ? o.mask : null;
+  if (!m) return g.drawImage(src, -w / 2, -h / 2, w, h);
+  // work at the size it ends up on the frame (capped) so edges stay crisp in exports
+  const T = g.getTransform();
+  const px = clamp(Math.hypot(T.a, T.b), 0.05, 4);
+  const k = Math.min(px, 2048 / Math.max(w, h));
+  const lw = Math.max(1, Math.round(w * k));
+  const lh = Math.max(1, Math.round(h * k));
+  const [lc, lg] = layerCanvas('ovLayer', lw, lh);
+  lg.drawImage(src, 0, 0, lw, lh);
+  const M = new DOMMatrix().translate(lw / 2 + (m.x || 0) * lw * 0.5, lh / 2 + (m.y || 0) * lh * 0.5).rotate(m.rot || 0);
+  maskLayer(lc, m, M, Math.min(lw, lh));
+  g.drawImage(lc, -w / 2, -h / 2, w, h);
+  if (g === V.g && !V.playing && V.sel?.kind === 'overlay' && V.sel.id === o.id) {
+    g.save();
+    g.globalCompositeOperation = 'source-over';
+    g.globalAlpha = 1;
+    strokeMaskGuide(g, m, T.translate(-w / 2, -h / 2).scale(w / lw, h / lh).multiply(M), Math.min(lw, lh));
+    g.restore();
+  }
+}
+
 function drawOverlays(g, W, Hh, t, hits) {
   const m = Math.min(W, Hh);
   for (const o of V.p.overlays) {
@@ -909,6 +1001,7 @@ function drawOverlays(g, W, Hh, t, hits) {
     const cy = (k.y + a.dy) * Hh;
     g.save();
     g.globalAlpha = a.alpha * k.opacity;
+    g.globalCompositeOperation = blendOp(o.blend);
     g.translate(cx, cy);
     if (o.rot) g.rotate((o.rot * Math.PI) / 180);
     g.scale(a.scale, a.scale);
@@ -967,8 +1060,7 @@ function drawOverlays(g, W, Hh, t, hits) {
             g.arc(0, 0, Math.min(w, h) / 2, 0, Math.PI * 2);
             g.clip();
           }
-          if (o.chroma) g.drawImage(chromaKey(img, o.chroma, o.chromaTol ?? 30), -w / 2, -h / 2, w, h);
-          else g.drawImage(img, -w / 2, -h / 2, w, h);
+          drawOverlayMedia(g, o, o.chroma ? chromaKey(img, o.chroma, o.chromaTol ?? 30) : img, w, h);
           bw = w;
           bh = h;
         } else {
@@ -989,8 +1081,7 @@ function drawOverlays(g, W, Hh, t, hits) {
           g.arc(0, 0, Math.min(w, h) / 2, 0, Math.PI * 2);
           g.clip();
         }
-        if (o.chroma) g.drawImage(chromaKey(img, o.chroma, o.chromaTol ?? 30), -w / 2, -h / 2, w, h);
-        else g.drawImage(img, -w / 2, -h / 2, w, h);
+        drawOverlayMedia(g, o, o.chroma ? chromaKey(img, o.chroma, o.chromaTol ?? 30) : img, w, h);
         bw = w;
         bh = h;
       } else {
@@ -1266,7 +1357,7 @@ async function freezeFrame() {
   const local = V.t - act.start;
   const i = act.idx;
   const src = act.clip;
-  const freeze = { id: uid(), type: 'image', mediaId: m.id, dur: 2, speed: 1, fit: src.fit, filter: src.filter, adjust: { ...(src.adjust || {}) }, effect: 'none', tf: src.tf ? { ...src.tf } : undefined, transition: { type: 'none', dur: 0.5 } };
+  const freeze = { id: uid(), type: 'image', mediaId: m.id, dur: 2, speed: 1, fit: src.fit, filter: src.filter, adjust: { ...(src.adjust || {}) }, effect: 'none', tf: src.tf ? { ...src.tf } : undefined, opacity: src.opacity, mask: src.mask ? { ...src.mask } : undefined, transition: { type: 'none', dur: 0.5 } };
   if (local > 0.1 && local < clipDur(src) - 0.1) {
     const b = { ...structuredClone(src), id: uid(), transition: { type: 'none', dur: 0.5 } };
     const cut = src.in + local * (src.speed || 1);
@@ -1980,7 +2071,7 @@ function renderTimeline() {
     .join('');
   const auBlocks = au.out
     .map(([a, l]) => `<div class="tl-block au ${isSel('audio', a.id) ? 'sel' : ''}" data-kind="audio" data-id="${a.id}" style="left:${a.start * pps}px;width:${Math.max(6, (a.out - a.in) * pps - 2)}px;top:${l * 30}px">
-      <span class="tl-label">♪ ${H.esc(a.name || 'Audio')}</span><i class="h-l"></i><i class="h-r"></i></div>`)
+      <span class="tl-label">♪ ${H.esc(a.name || 'Audio')}${a.voice ? ` · ${H.esc(voiceName(a.voice))}` : ''}</span><i class="h-l"></i><i class="h-r"></i></div>`)
     .join('');
   inner.style.width = `${width}px`;
   inner.innerHTML = `
@@ -3020,6 +3111,159 @@ function renderAIPanel(p) {
 }
 
 // ---------- inspector ----------
+// ---------- masks, voice changer and audio extraction (inspector parts) ----------
+const ADJ_EXTRA = [['temp', 'Temperature', -1], ['tint', 'Tint', -1], ['fade', 'Fade', 0], ['vignette', 'Vignette', 0], ['sharpen', 'Sharpen', 0]];
+const MASK_SLIDERS = [
+  ['size', 'Size', 0.05, 1.6, 0.01, (t) => t !== 'linear'],
+  ['aspect', 'Stretch', 0.3, 3, 0.01, (t) => ['circle', 'rect', 'heart', 'star'].includes(t)],
+  ['round', 'Corner roundness', 0, 1, 0.01, (t) => t === 'rect'],
+  ['feather', 'Feather (soft edge)', 0, 1, 0.01, () => true],
+  ['x', 'Move left / right', -1, 1, 0.01, () => true],
+  ['y', 'Move up / down', -1, 1, 0.01, () => true],
+  ['rot', 'Rotation', -180, 180, 1, () => true],
+];
+function maskSection(s) {
+  const m = { ...DEFAULT_MASK, ...(s.mask || {}) };
+  const on = isMasked(s.mask);
+  return `<h4>Mask</h4>
+    <div class="mask-grid" role="group" aria-label="Mask shape">${MASKS.map(([id, l]) => `<button data-mask="${id}" class="${m.type === id ? 'on' : ''}" title="${l}" aria-pressed="${m.type === id}">${maskIcon(id)}<span>${l}</span></button>`).join('')}</div>
+    ${on ? `<div class="mask-opts">${MASK_SLIDERS.filter((x) => x[5](m.type)).map(([k, l, min, max, step]) => `<label class="frow">${k === 'size' && m.type === 'mirror' ? 'Band width' : k === 'rot' && m.type === 'linear' ? 'Angle' : l} <b data-mkv="${k}">${k === 'rot' ? `${Math.round(m[k])}°` : ''}</b><input type="range" data-mk="${k}" min="${min}" max="${max}" step="${step}" value="${m[k]}"></label>`).join('')}
+      <div class="row wrap"><label class="row"><input type="checkbox" id="mInvert" ${m.invert ? 'checked' : ''}> Invert</label><button class="btn ghost small" id="mReset">Reset mask</button></div></div>` : ''}`;
+}
+function bindMask(el, s) {
+  $$('[data-mask]', el).forEach((b) => (b.onclick = () => {
+    const type = b.dataset.mask;
+    const prev = s.mask || {};
+    s.mask = { ...DEFAULT_MASK, ...prev, type };
+    if (type === 'mirror' && (prev.type || 'none') !== 'mirror') s.mask.size = 0.4;
+    if (type === 'linear' && (prev.type || 'none') !== 'linear') s.mask.feather = Math.max(s.mask.feather, 0.1);
+    commit();
+  }));
+  $$('[data-mk]', el).forEach((r) => {
+    r.oninput = () => {
+      s.mask = { ...DEFAULT_MASK, ...(s.mask || {}), [r.dataset.mk]: +r.value };
+      const v = $(`[data-mkv="${r.dataset.mk}"]`, el);
+      if (v && r.dataset.mk === 'rot') v.textContent = `${Math.round(+r.value)}°`;
+    };
+    r.onchange = () => commit();
+  });
+  const inv = $('#mInvert', el);
+  if (inv) inv.onchange = () => { s.mask = { ...DEFAULT_MASK, ...(s.mask || {}), invert: inv.checked }; commit(); };
+  const rs = $('#mReset', el);
+  if (rs) rs.onclick = () => { s.mask = { ...DEFAULT_MASK, type: s.mask?.type || 'none' }; commit(); };
+}
+
+function voiceSection(cur) {
+  const busy = !!V.voiceBusy;
+  return `<h4>Voice changer</h4>
+    <div class="filter-grid voice-grid">${[['none', 'Original voice'], ...VOICE_FX].map(([id, l]) => `<button data-voice="${id}" class="${cur === id ? 'on' : ''}" ${busy ? 'disabled' : ''}>${l}</button>`).join('')}</div>
+    <p class="muted vc-status" id="vcStatus" aria-live="polite">${H.esc(V.voiceMsg || '')}</p>`;
+}
+function voiceStatus(msg) {
+  if (!V) return;
+  V.voiceMsg = msg;
+  const e = $('#vcStatus');
+  if (e) e.textContent = msg;
+}
+async function runVoice(job) {
+  if (V.voiceBusy) return H.toast('Still changing the last voice…');
+  V.voiceBusy = true;
+  $$('[data-voice]').forEach((b) => (b.disabled = true));
+  try {
+    await job();
+  } catch (e) {
+    console.warn('voice changer', e);
+    H.toast(e?.name === 'EncodingError' || /too short|decode/i.test(String(e?.message)) ? 'There is no sound to change here' : 'Could not change the voice');
+  } finally {
+    if (V) {
+      V.voiceBusy = false;
+      V.voiceMsg = '';
+      renderInspector();
+    }
+  }
+}
+async function renderVoice(mediaId, preset, opts, name) {
+  const m = await getMedia(mediaId);
+  if (!m?.blob) throw new Error('missing media');
+  const started = performance.now();
+  const { blob } = await changeVoice(await m.blob.arrayBuffer(), preset, { ...opts, onStep: voiceStatus });
+  const meta = await importFile(new File([blob], `${(name || 'Voice').replace(/\.\w+$/, '')} · ${voiceName(preset)}.wav`, { type: 'audio/wav' }));
+  if (!meta) throw new Error('import failed');
+  voiceStatus(`Done in ${((performance.now() - started) / 1000).toFixed(1)}s`);
+  return meta;
+}
+/** Voice changer on an audio track. The original media and range are kept in voiceSrc. */
+async function applyVoiceToTrack(a, preset) {
+  const src = a.voiceSrc || { mediaId: a.mediaId, in: 0, speed: 1 };
+  const sp = src.speed || 1;
+  const from = src.in + a.in * sp;
+  const to = src.in + a.out * sp;
+  if (preset === 'none') {
+    if (!a.voiceSrc) return;
+    const clip = a.voiceOf && V.p.clips.find((c) => c.id === a.voiceOf);
+    if (clip) {
+      // made from a clip's sound: give the clip its own sound back
+      V.p.audio = V.p.audio.filter((x) => x !== a);
+      clip.muted = false;
+      V.sel = { kind: 'clip', id: clip.id };
+    } else {
+      Object.assign(a, { mediaId: src.mediaId, in: from, out: to });
+      delete a.voice;
+      delete a.voiceSrc;
+    }
+    await prepareAll();
+    commit();
+    return H.toast('Original voice restored');
+  }
+  await runVoice(async () => {
+    const meta = await renderVoice(src.mediaId, preset, { from, to, speed: sp }, a.name || V.meta.get(src.mediaId)?.name);
+    Object.assign(a, { voiceSrc: { mediaId: src.mediaId, in: from, speed: sp }, voice: preset, mediaId: meta.id, in: 0, out: Math.max(0.1, meta.duration) });
+    await prepareAll();
+    commit();
+    H.toast(`Voice: ${voiceName(preset)}`);
+  });
+}
+/** Voice changer on a video clip's own sound: the changed sound goes on an audio track and the clip is muted. */
+async function applyVoiceToClip(c, preset) {
+  const linked = V.p.audio.find((a) => a.voiceOf === c.id);
+  if (preset === 'none') {
+    if (linked) V.p.audio = V.p.audio.filter((a) => a !== linked);
+    c.muted = false;
+    await prepareAll();
+    commit();
+    return H.toast('Original voice restored');
+  }
+  await runVoice(async () => {
+    const sp = c.speed || 1;
+    const name = V.meta.get(c.mediaId)?.name || 'Clip';
+    const meta = await renderVoice(c.mediaId, preset, { from: c.in, to: c.out, speed: sp }, name);
+    const idx = V.p.clips.indexOf(c);
+    if (idx < 0) return;
+    const a = linked || { id: uid(), volume: c.volume ?? 1, fadeIn: 0, fadeOut: 0, voiceOf: c.id };
+    Object.assign(a, { mediaId: meta.id, start: clipStarts()[idx], in: 0, out: Math.max(0.1, meta.duration), voice: preset, voiceSrc: { mediaId: c.mediaId, in: c.in, speed: sp }, name: `${name.replace(/\.\w+$/, '')} voice` });
+    if (!linked) V.p.audio.push(a);
+    c.muted = true;
+    await prepareAll();
+    commit();
+    H.toast(`Voice: ${voiceName(preset)} — the clip's own sound is muted`);
+  });
+}
+/** Put a video clip's sound on its own audio track (at 1× speed) and mute the clip. */
+function extractAudio(c) {
+  if (c.type !== 'video') return;
+  const idx = V.p.clips.indexOf(c);
+  if (idx < 0) return;
+  const sp = c.speed || 1;
+  const name = (V.meta.get(c.mediaId)?.name || 'Clip').replace(/\.\w+$/, '');
+  const a = { id: uid(), mediaId: c.mediaId, start: clipStarts()[idx], in: c.in, out: c.out, volume: c.volume ?? 1, fadeIn: 0, fadeOut: 0, name: `${name} audio`, fromClip: c.id };
+  V.p.audio.push(a);
+  c.muted = true;
+  prepareAll();
+  V.sel = { kind: 'audio', id: a.id };
+  commit();
+  H.toast(sp !== 1 ? `Audio extracted at normal speed (1×) — the clip plays at ${sp}×` : 'Audio extracted to its own track — the clip is muted');
+}
+
 function renderInspector() {
   const el = $('#vInspector');
   if (!el || !V) return;
@@ -3072,6 +3316,10 @@ function renderInspector() {
            <div class="field"><label>Volume <b>${Math.round((s.volume ?? 1) * 100)}%</b></label><input type="range" id="cVol" min="0" max="2" step="0.05" value="${s.volume ?? 1}"></div>
            <label class="row"><input type="checkbox" id="cMute" ${s.muted ? 'checked' : ''}> Mute clip sound</label>`}
       <div class="field mt"><label>Framing</label><div class="seg"><button data-fit="fill" class="${s.fit !== 'fit' ? 'on' : ''}">Fill frame</button><button data-fit="fit" class="${s.fit === 'fit' ? 'on' : ''}">Fit + blur</button></div></div>
+      <div class="field"><label>Opacity <b>${Math.round((s.opacity ?? 1) * 100)}%</b></label><input type="range" id="cOp" min="0" max="1" step="0.01" value="${s.opacity ?? 1}"></div>
+      ${s.type === 'video' ? `<h4>Sound</h4>
+      <div class="row wrap"><button class="btn ghost small" id="cExtract">${H.icon('music', 14)} Extract audio</button></div>
+      ${voiceSection(V.p.audio.find((a) => a.voiceOf === s.id)?.voice || 'none')}` : ''}
       <h4>Clip motion</h4>
       <div class="filter-grid">${EFFECTS.map(([id, l]) => `<button data-fx="${id}" class="${(s.effect || 'none') === id ? 'on' : ''}">${l}</button>`).join('')}</div>
       <div class="row wrap mt"><button class="btn ghost small" id="cMoreFx">${H.icon('sparkle', 14)} Video & body effects</button>${idx > 0 ? `<button class="btn ghost small" id="cMoreTr">${H.icon('transition', 14)} Transitions</button>` : ''}</div>
@@ -3079,11 +3327,15 @@ function renderInspector() {
       <label class="frow">Zoom <input type="range" id="tZoom" min="1" max="3" step="0.02" value="${tf.zoom || 1}"></label>
       <label class="frow">Move left / right <input type="range" id="tX" min="-1" max="1" step="0.01" value="${tf.x || 0}"></label>
       <label class="frow">Move up / down <input type="range" id="tY" min="-1" max="1" step="0.01" value="${tf.y || 0}"></label>
-      <div class="row wrap"><button class="btn ghost small" id="tRot">Rotate 90°</button><button class="btn ghost small" id="tFx">Flip ↔</button><button class="btn ghost small" id="tFy">Flip ↕</button><button class="btn ghost small" id="tReset">Reset</button></div>` : ''}
+      <label class="frow">Rotate <b id="tRotFv">${Math.round(tf.r || 0)}°</b> <input type="range" id="tRotF" min="-180" max="180" step="1" value="${tf.r || 0}"></label>
+      <div class="row wrap"><button class="btn ghost small" id="tRot">Rotate 90°</button><button class="btn ghost small" id="tFx">Flip ↔</button><button class="btn ghost small" id="tFy">Flip ↕</button><button class="btn ghost small" id="tReset">Reset</button></div>
+      ${maskSection(s)}` : ''}
       <h4>Filter</h4>
       <div class="filter-grid">${FILTERS.map((f) => `<button data-flt="${f.id}" class="${(s.filter || 'none') === f.id ? 'on' : ''}">${f.label}</button>`).join('')}</div>
       <h4>Adjust</h4>
       ${['brightness', 'contrast', 'saturate'].map((k) => `<label class="frow">${k === 'saturate' ? 'Saturation' : k[0].toUpperCase() + k.slice(1)} <input type="range" data-adj="${k}" min="0.3" max="1.8" step="0.02" value="${s.adjust?.[k] ?? 1}"></label>`).join('')}
+      ${s.type !== 'color' ? `${ADJ_EXTRA.map(([k, l, min]) => `<label class="frow">${l} <input type="range" data-adj="${k}" min="${min}" max="1" step="0.02" value="${s.adjust?.[k] ?? 0}"${min < 0 ? ' class="mid"' : ''}></label>`).join('')}
+      ${Object.keys(s.adjust || {}).length ? `<button class="btn ghost small" id="cAdjReset">Reset adjustments</button>` : ''}` : ''}
       ${idx > 0 ? `<h4>Transition into this clip</h4>
         <div class="filter-grid">${TRANSITIONS.map(([id, l]) => `<button data-tr="${id}" class="${(s.transition?.type || 'none') === id ? 'on' : ''}">${l}</button>`).join('')}</div>
         <div class="field mt"><label>Transition length <b>${(s.transition?.dur || 0.5).toFixed(1)}s</b></label><input type="range" id="cTrDur" min="0.2" max="2" step="0.1" value="${s.transition?.dur || 0.5}"></div>
@@ -3110,6 +3362,15 @@ function renderInspector() {
     on('#tFx', 'onclick', () => { setTf('fx', !tf.fx); commit(); });
     on('#tFy', 'onclick', () => { setTf('fy', !tf.fy); commit(); });
     on('#tReset', 'onclick', () => { s.tf = {}; commit(); });
+    on('#tRotF', 'oninput', (e) => { setTf('r', +e.target.value); $('#tRotFv', el).textContent = `${Math.round(+e.target.value)}°`; });
+    on('#tRotF', 'onchange', () => commit());
+    on('#tRotF', 'ondblclick', () => { setTf('r', 0); commit(); });
+    on('#cOp', 'oninput', (e) => { s.opacity = +e.target.value; e.target.previousElementSibling.querySelector('b').textContent = `${Math.round(s.opacity * 100)}%`; });
+    on('#cOp', 'onchange', () => commit());
+    on('#cAdjReset', 'onclick', () => { s.adjust = {}; commit(); });
+    on('#cExtract', 'onclick', () => extractAudio(s));
+    bindMask(el, s);
+    $$('[data-voice]', el).forEach((b) => (b.onclick = () => applyVoiceToClip(s, b.dataset.voice)));
     on('#cDur', 'onchange', () => commit());
     $$('[data-spd]', el).forEach((b) => (b.onclick = () => { s.speed = +b.dataset.spd; commit(); }));
     on('#cVol', 'oninput', (e) => { s.volume = +e.target.value; });
@@ -3148,6 +3409,8 @@ function renderInspector() {
       <label class="row mt"><input type="checkbox" id="oShadow" ${s.shadow ? 'checked' : ''}> Drop shadow</label>`
       : `<div class="field"><label>Size <b>${Math.round(s.scale * 100)}</b></label><input type="range" id="oScale" min="0.05" max="1.5" step="0.01" value="${s.scale}"></div>
          ${s.emoji ? '' : `<label class="row"><input type="checkbox" id="oRound" ${s.round ? 'checked' : ''}> Circle crop</label>`}
+         <div class="field mt"><label>Blend mode</label><select id="oBlend">${BLEND_MODES.map(([id, l]) => `<option value="${id}" ${(s.blend || 'normal') === id ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+         ${s.emoji ? '' : maskSection(s)}
          ${s.type === 'video' ? `<div class="field mt"><label>Volume <b>${Math.round((s.volume ?? 1) * 100)}%</b></label><input type="range" id="oVol" min="0" max="2" step="0.05" value="${s.volume ?? 1}"></div>
            <label class="row"><input type="checkbox" id="oMute" ${s.muted ? 'checked' : ''}> Mute</label>` : ''}
          ${s.emoji ? '' : `<h4>Green screen (chroma key)</h4>
@@ -3188,6 +3451,8 @@ function renderInspector() {
     pair('#oGlOn', '#oGl', 'glow');
     on('#oShadow', 'onchange', (e) => { s.shadow = e.target.checked; commit(); });
     on('#oRound', 'onchange', (e) => { s.round = e.target.checked; commit(); });
+    on('#oBlend', 'onchange', (e) => { s.blend = e.target.value; commit(); });
+    bindMask(el, s);
     on('#oVol', 'oninput', (e) => { s.volume = +e.target.value; });
     on('#oVol', 'onchange', () => commit());
     on('#oMute', 'onchange', (e) => { s.muted = e.target.checked; commit(); });
@@ -3259,7 +3524,8 @@ function renderInspector() {
       <div class="field"><label>Volume <b>${Math.round((s.volume ?? 1) * 100)}%</b></label><input type="range" id="aVol" min="0" max="2" step="0.05" value="${s.volume ?? 1}"></div>
       <div class="field"><label>Fade in <b>${(s.fadeIn || 0).toFixed(1)}s</b></label><input type="range" id="aIn" min="0" max="5" step="0.1" value="${s.fadeIn || 0}"></div>
       <div class="field"><label>Fade out <b>${(s.fadeOut || 0).toFixed(1)}s</b></label><input type="range" id="aOut" min="0" max="5" step="0.1" value="${s.fadeOut || 0}"></div>
-      <div class="row wrap"><button class="btn ghost small" id="aFit">Trim to video length</button><button class="btn ghost small" id="aSplit">Split</button><button class="btn ghost small" id="aDel">Delete</button></div>`;
+      <div class="row wrap"><button class="btn ghost small" id="aFit">Trim to video length</button><button class="btn ghost small" id="aSplit">Split</button><button class="btn ghost small" id="aDel">Delete</button></div>
+      ${voiceSection(s.voice || 'none')}`;
     const on = (id, ev, fn) => { const x = $(id, el); if (x) x[ev] = fn; };
     on('#aVol', 'oninput', (e) => { s.volume = +e.target.value; });
     on('#aVol', 'onchange', () => commit());
@@ -3268,6 +3534,7 @@ function renderInspector() {
     on('#aFit', 'onclick', () => { const md = mainDur(); if (md > s.start) { s.out = Math.min(s.out, s.in + (md - s.start)); commit(); } });
     on('#aSplit', 'onclick', splitAtPlayhead);
     on('#aDel', 'onclick', deleteSel);
+    $$('[data-voice]', el).forEach((b) => (b.onclick = () => applyVoiceToTrack(s, b.dataset.voice)));
   }
 }
 
