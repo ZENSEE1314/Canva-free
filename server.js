@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { stockRouter, STOCK_UA } from './server/stock.js';
+import { createShareStore, shareRouter, attachCollab } from './server/share.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(__dirname, 'dist');
@@ -17,6 +19,16 @@ if (!fs.existsSync(path.join(dist, 'index.html'))) {
 
 app.disable('x-powered-by');
 app.get('/health', (_req, res) => res.json({ ok: true, app: 'artvas' }));
+
+// ---- Free stock photos / audio / video (Openverse + Wikimedia Commons; Pexels/Pixabay when a key is set)
+app.use('/api/stock', stockRouter());
+
+// ---- Shared designs (view / edit links) and live collaboration. Stored under DATA_DIR.
+// Note: on hosts without a persistent disk (e.g. Railway without a volume) shared designs are lost on redeploy.
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const shareStore = createShareStore(DATA_DIR);
+let collab = null;
+app.use('/api/share', shareRouter(shareStore, { broadcast: (...a) => collab?.broadcast(...a) }));
 
 // ---- AI image relay (Muapi.ai). The user's own API key is passed through per request and never stored here.
 const MUAPI = 'https://api.muapi.ai/api/v1';
@@ -186,16 +198,28 @@ app.get('/api/image-proxy', async (req, res) => {
   }
   if (url.protocol !== 'https:') return res.status(400).end();
   try {
-    const r = await fetch(url, { redirect: 'follow' });
-    const type = r.headers.get('content-type') || '';
-    if (!r.ok || !(type.startsWith('image/') || type.startsWith('video/') || type.startsWith('audio/') || type === 'application/octet-stream' || type === 'binary/octet-stream')) return res.status(415).end();
+    // Wikimedia (and some other hosts) refuse requests without a descriptive User-Agent
+    const r = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': STOCK_UA, Accept: 'image/*,video/*,audio/*,*/*;q=0.8' }, signal: AbortSignal.timeout(120000) });
+    let type = (r.headers.get('content-type') || '').toLowerCase().split(';')[0].trim();
+    // some file hosts answer with a generic type: work it out from the file name
+    if (!type || type === 'application/octet-stream' || type === 'binary/octet-stream') {
+      const ext = (new URL(r.url || url).pathname.match(/\.(\w{2,5})$/) || [])[1]?.toLowerCase();
+      const byExt = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', svg: 'image/svg+xml', mp4: 'video/mp4', webm: 'video/webm', ogv: 'video/ogg', mov: 'video/quicktime', mp3: 'audio/mpeg', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4', flac: 'audio/flac' };
+      type = byExt[ext] || 'application/octet-stream';
+    }
+    if (type === 'application/ogg') type = 'audio/ogg';
+    if (!r.ok) return res.status(r.status === 429 ? 429 : r.status === 404 ? 404 : 502).end();
+    if (!r.ok || !(type.startsWith('image/') || type.startsWith('video/') || type.startsWith('audio/') || type === 'application/octet-stream')) return res.status(415).end();
+    if (+r.headers.get('content-length') > 200 * 1024 * 1024) return res.status(413).end();
     const buf = Buffer.from(await r.arrayBuffer());
     if (buf.length > 200 * 1024 * 1024) return res.status(413).end();
-    res.type(type).set('Cache-Control', 'private, max-age=3600').send(buf);
+    res.type(type).set({ 'Cache-Control': 'private, max-age=3600', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox" }).send(buf);
   } catch {
     res.status(502).end();
   }
 });
+// unknown API routes are errors, not the app page (and never a listing of shared designs)
+app.all('/api/*', (_req, res) => res.status(404).json({ error: 'Not found' }));
 app.use(
   express.static(dist, {
     maxAge: '1y',
@@ -210,4 +234,10 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(dist, 'index.html'));
 });
 
-app.listen(PORT, '0.0.0.0', () => console.log(`Artvas running on port ${PORT}`));
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`Artvas running on port ${PORT}`));
+collab = attachCollab(server, shareStore);
+for (const sig of ['SIGTERM', 'SIGINT'])
+  process.on(sig, async () => {
+    await shareStore.flush();
+    process.exit(0);
+  });

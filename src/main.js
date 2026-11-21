@@ -23,11 +23,15 @@ import { openVideoEditor, closeVideoEditor, newVideoProject, VIDEO_PRESETS, SCRE
 import { VIDEO_TEMPLATES, TEMPLATE_CATS as VT_CATS, buildFromTemplate, templateDuration } from './videotemplates.js';
 import { icon } from './icons.js';
 import { fontsIn, fontsInFully, coreFonts, loadFamily } from './fonts.js';
+import { startPresentation, bootPresenter, TRANSITIONS, _present } from './present.js';
+import * as collab from './collab.js';
+import { openShareDialog, openSharedLink, parseSharedHash, sicon } from './share.js';
+import { renderStockTab } from './stock.js';
 
 const PROPS = [
   'name', 'locked', 'selectable', 'evented', 'hasControls', 'lockMovementX', 'lockMovementY',
   'lockRotation', 'lockScalingX', 'lockScalingY', 'bgGradient', 'anim', 'placeholder', 'frameShape', 'kind', 'chart', 'table', 'aiPrompt',
-  'curve', 'qr',
+  'curve', 'qr', 'cid',
 ];
 
 const app = document.getElementById('app');
@@ -107,6 +111,8 @@ function refreshTextWhenFontsLoad(obj) {
 // =====================================================
 async function renderHome() {
   closeVideoEditor();
+  collab.disconnect();
+  _present()?.exit();
   state.canvas?.dispose();
   state.canvas = null;
   state.design = null;
@@ -332,6 +338,7 @@ function videoHelpers() {
   };
 }
 async function openVideo(project, opts = {}) {
+  collab.disconnect();
   state.canvas?.dispose();
   state.canvas = null;
   state.design = null;
@@ -434,10 +441,12 @@ async function importDesignFile(file) {
 // =====================================================
 async function openEditor(design) {
   closeVideoEditor();
+  collab.disconnect();
+  _present()?.exit();
   state.design = design;
   state.page = 0;
   state.lastVersionAt = 0;
-  try { history.replaceState(null, '', `#/design/${design.id}`); } catch {}
+  try { history.replaceState(null, '', design.shared?.editToken ? `#/shared/${design.shared.id}/${design.shared.editToken}` : `#/design/${design.id}`); } catch {}
   app.innerHTML = editorHTML();
   bindTopbar();
   bindTabs();
@@ -477,6 +486,7 @@ async function openEditor(design) {
   renderTab();
   renderProps();
   renderPages();
+  if (design.shared?.editToken) startLive();
 }
 
 function editorHTML() {
@@ -509,6 +519,12 @@ function editorHTML() {
       <div class="spacer"></div>
       <span class="dim-label">${d.width} × ${d.height}px</span>
       <button class="tb-btn" id="saveFile" title="Download editable .json file">${icon('save')}<span class="lbl">Save file</span></button>
+      <div class="collab-avatars" id="collabAvatars" aria-label="People editing"></div>
+      <div class="dropdown present-wrap">
+        <div class="split-btn"><button class="tb-btn" id="presentBtn" title="Present (full screen)">${icon('play')}<span class="lbl">Present</span></button><button class="tb-btn caret" id="presentOpts" title="Presentation options" aria-label="Presentation options">${icon('down', 14)}</button></div>
+        <div class="menu present-menu" id="presentMenu" hidden></div>
+      </div>
+      <button class="tb-btn share-top" id="shareTop" title="Share & edit together">${sicon('users')}<span class="lbl">Share</span></button>
       <div class="dropdown">
         <button class="btn primary" id="shareBtn" title="Download">${icon('download')}<span class="lbl">Download</span></button>
         <div class="menu" id="exportMenu" hidden>
@@ -527,6 +543,10 @@ function editorHTML() {
           <label>Pages <select id="exPages"><option value="current">Current page</option><option value="all">All pages</option></select></label>
           <label class="row"><input type="checkbox" id="exTransparent"> Transparent background (PNG)</label>
           <button class="btn primary block" id="doExport">Download</button>
+          <div class="menu-mobile-only">
+            <button class="btn ghost block" id="mPresent">${icon('play')} Present</button>
+            <button class="btn ghost block" id="mShare">${sicon('users')} Share & edit together</button>
+          </div>
         </div>
       </div>
     </header>
@@ -544,7 +564,12 @@ function editorHTML() {
         <div class="stage" id="stage">
           <div class="canvas-holder" id="holder"><canvas id="c"></canvas></div>
         </div>
+        <div class="notes-bar" id="notesBar" ${state.notesOpen ? '' : 'hidden'}>
+          <label for="pageNotes">Speaker notes · page <span id="notesPage">1</span></label>
+          <textarea id="pageNotes" rows="3" placeholder="Notes for this page — shown in Presenter view, not on the slide"></textarea>
+        </div>
         <div class="bottom-bar">
+          <button class="tb-btn small notes-btn ${state.notesOpen ? 'on' : ''}" id="notesBtn" title="Speaker notes for this page">${icon('type')}<span>Notes</span></button>
           <div class="pages" id="pages"></div>
           <div class="zoom">
             <button class="icon-btn" id="zoomOut" title="Zoom out">${icon('minus')}</button>
@@ -623,6 +648,7 @@ function bindTopbar() {
   };
   $('#resizeBtn').onclick = openResizeDialog;
   $('#historyBtn').onclick = openHistoryDialog;
+  bindPresentControls();
   $('#zoomIn').onclick = () => { state.autoFit = false; setZoom(state.zoom * 1.2); };
   $('#zoomOut').onclick = () => { state.autoFit = false; setZoom(state.zoom / 1.2); };
   $('#zoomFit').onclick = () => { state.autoFit = true; fitZoom(); };
@@ -746,6 +772,7 @@ function setZoom(z) {
   c.requestRenderAll();
   $('#zoomLabel').textContent = Math.round(z * 100) + '%';
   $('#zoomRange').value = Math.round(z * 100);
+  collab.renderCursors();
 }
 
 function fitZoom() {
@@ -767,7 +794,12 @@ function bindCanvasEvents() {
     schedulePersist();
     renderLayersIfOpen();
   };
-  c.on('object:added', onChange);
+  // every object gets a stable id (used to match objects during live editing)
+  c.on('object:added', (e) => {
+    const o = e.target;
+    if (o && !o.excludeFromExport && (!o.cid || c.getObjects().some((x) => x !== o && x.cid === o.cid))) o.cid = uid();
+    onChange();
+  });
   c.on('object:removed', onChange);
   c.on('object:modified', () => {
     onChange();
@@ -1158,6 +1190,7 @@ function updateUndoButtons() {
 // ---------- Persist ----------
 let persistTimer;
 function schedulePersist() {
+  collab.onLocalChange();
   const s = $('#saveStatus');
   if (s) s.textContent = 'Saving…';
   clearTimeout(persistTimer);
@@ -1188,6 +1221,7 @@ async function persist() {
     const s = $('#saveStatus');
     if (s) s.textContent = 'Saved';
     maybeAutoVersion();
+    collab.afterPersist();
   } catch (e) {
     console.error(e);
     const s = $('#saveStatus');
@@ -1215,6 +1249,8 @@ async function loadPage(i) {
   updateUndoButtons();
   renderProps();
   renderLayersIfOpen();
+  syncNotes();
+  collab.renderCursors();
 }
 
 async function switchPage(i) {
@@ -1965,14 +2001,16 @@ function tabUploads(p) {
   );
 }
 
-async function tabPhotos(p) {
-  p.innerHTML = `
-    <h3>Photos</h3>
-    <p class="muted">Free stock photos from Lorem Picsum (Unsplash photographers). Click to add, or use as background.</p>
-    <div class="img-grid" id="photoGrid"><p class="muted">Loading…</p></div>
-    <button class="btn ghost block" id="morePhotos">Load more</button>`;
-  const grid = $('#photoGrid', p);
-  const load = async () => {
+function tabPhotos(p) {
+  state.stock ||= {};
+  renderStockTab(p, { addImage, setBackgroundImage, toast, picsum: loadPicsum }, state.stock);
+}
+
+/** Lorem Picsum photos (the fallback when the free stock search is unavailable). */
+function loadPicsum(grid, more, reset) {
+  if (reset) state.photosPage = 1;
+  else state.photosPage++;
+  (async () => {
     try {
       const r = await fetch(`https://picsum.photos/v2/list?page=${state.photosPage}&limit=24`);
       const list = await r.json();
@@ -1992,16 +2030,11 @@ async function tabPhotos(p) {
         img.ondragstart = (e) => e.dataTransfer.setData('text/artvas-img', img.dataset.full);
       });
       $$('[data-bg]', grid).forEach((b) => (b.onclick = () => setBackgroundImage(b.dataset.bg)));
+      more.hidden = false;
     } catch {
       grid.innerHTML = '<p class="muted">Could not load photos (are you offline?).</p>';
     }
-  };
-  state.photosPage = 1;
-  $('#morePhotos', p).onclick = () => {
-    state.photosPage++;
-    load();
-  };
-  load();
+  })();
 }
 
 function tabDraw(p) {
@@ -3656,8 +3689,17 @@ function showStorageBanner() {
 }
 
 async function boot() {
+  const pres = location.hash.match(/^#\/presenter\/(\w+)/);
+  if (pres) return bootPresenter(app, pres[1]);
   await loadBrand();
   await loadMyTemplates();
+  const sh = parseSharedHash();
+  if (sh) {
+    return openSharedLink(
+      { app, openEditor, getDesign, saveDesign, toast, renderHome, designPageToBlob, logoSvg },
+      sh
+    );
+  }
   const m = location.hash.match(/^#\/(?:design|video)\/(\w+)/) || location.pathname.match(/^\/design\/(\w+)/);
   if (m) {
     const d = await getDesign(m[1]).catch(() => null);
@@ -4521,7 +4563,117 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && sta
 boot();
 
 // expose a tiny API for debugging/testing
-window.artvas = { video: _videoDebug, openVideo, pickVideoStarter, loadPack, state, addText, addShape, addImage, exportDesign, util, templateThumb, TEMPLATES, FORMATS, extras: { startCrop, finishCrop, setCrop: (r) => { if (state.crop) { state.crop.rect = { ...state.crop.rect, ...r }; clampCropRect(); placeCropBox(); } }, extractPalette, arrangeSelection, buildQR, addQR, setDuotone, curveLayout, ActiveSelection, duotoneClass: () => installDesignExtras.Duotone } };
+// =====================================================
+// PRESENT, NOTES, SHARE & LIVE EDITING
+// =====================================================
+const presentOpts = () => ({ transition: 'fade', autoplay: false, loop: false, fromCurrent: false, ...(state.design?.present || {}) });
+
+function presentNow({ presenter = false } = {}) {
+  const d = state.design;
+  if (!d) return;
+  if (!state.crop) captureCurrentPage();
+  const o = presentOpts();
+  startPresentation(d, {
+    transition: o.transition,
+    autoplay: o.autoplay,
+    loop: o.loop,
+    presenter,
+    start: o.fromCurrent ? state.page : 0,
+    toast,
+  });
+}
+
+function presentMenuHTML() {
+  const o = presentOpts();
+  return `<label>Transition between pages
+      <select id="pvTransition">${TRANSITIONS.map(([k, l]) => `<option value="${k}" ${o.transition === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    </label>
+    <label class="row"><input type="checkbox" id="pvAuto" ${o.autoplay ? 'checked' : ''}> Autoplay (uses each page's duration)</label>
+    <label class="row"><input type="checkbox" id="pvLoop" ${o.loop ? 'checked' : ''}> Loop at the end</label>
+    <label class="row"><input type="checkbox" id="pvFromCur" ${o.fromCurrent ? 'checked' : ''}> Start from the current page</label>
+    <button class="btn primary block" id="pvStart">${icon('play')} Present</button>
+    <button class="btn ghost block" id="pvPresenter">Presenter view (notes, next slide, timer)</button>
+    <p class="muted tiny">Keys: → / space next · ← back · L laser · A autoplay · P presenter view · Esc exit. Set page durations in Animate.</p>`;
+}
+
+function bindPresentControls() {
+  const menu = $('#presentMenu');
+  $('#presentBtn').onclick = () => presentNow();
+  $('#presentOpts').onclick = (e) => {
+    e.stopPropagation();
+    const open = menu.hidden;
+    $('#exportMenu').hidden = true;
+    menu.hidden = !open;
+    if (!open) return;
+    menu.innerHTML = presentMenuHTML();
+    const save = () => {
+      state.design.present = {
+        transition: $('#pvTransition').value,
+        autoplay: $('#pvAuto').checked,
+        loop: $('#pvLoop').checked,
+        fromCurrent: $('#pvFromCur').checked,
+      };
+      schedulePersist();
+    };
+    $$('select, input', menu).forEach((el) => (el.onchange = save));
+    $('#pvStart').onclick = () => { menu.hidden = true; presentNow(); };
+    $('#pvPresenter').onclick = () => { menu.hidden = true; presentNow({ presenter: true }); };
+  };
+  menu.onclick = (e) => e.stopPropagation();
+  document.addEventListener('click', () => { const m = $('#presentMenu'); if (m) m.hidden = true; });
+  $('#shareBtn').addEventListener('click', () => { if (menu) menu.hidden = true; });
+  $('#shareTop').onclick = openShare;
+  $('#mPresent').onclick = () => { $('#exportMenu').hidden = true; presentNow(); };
+  $('#mShare').onclick = () => { $('#exportMenu').hidden = true; openShare(); };
+  // speaker notes
+  $('#notesBtn').onclick = () => {
+    state.notesOpen = !state.notesOpen;
+    $('#notesBar').hidden = !state.notesOpen;
+    $('#notesBtn').classList.toggle('on', state.notesOpen);
+    syncNotes();
+    if (state.notesOpen) $('#pageNotes').focus();
+  };
+  $('#pageNotes').oninput = (e) => {
+    const page = state.design?.pages[state.page];
+    if (!page) return;
+    page.notes = e.target.value;
+    schedulePersist();
+  };
+  $('#pageNotes').onkeydown = (e) => e.stopPropagation();
+}
+
+function syncNotes() {
+  const ta = $('#pageNotes');
+  if (!ta || !state.design) return;
+  const page = state.design.pages[state.page];
+  if (document.activeElement !== ta) ta.value = page?.notes || '';
+  const n = $('#notesPage');
+  if (n) n.textContent = state.page + 1;
+  $('#notesBtn')?.classList.toggle('has', !!page?.notes);
+}
+
+function openShare() {
+  openShareDialog({ state, capture: captureCurrentPage, persist, toast, uid, startLive });
+}
+
+function startLive() {
+  const d = state.design;
+  if (!d?.shared?.editToken) return;
+  try { history.replaceState(null, '', `#/shared/${d.shared.id}/${d.shared.editToken}`); } catch {}
+  collab.connect(
+    {
+      state, PROPS, toast, uid,
+      capture: captureCurrentPage,
+      schedulePersist, renderPages, renderProps, renderLayersIfOpen, pushHistory, loadPage, updatePageThumb,
+      reopen: (design) => openEditor(design),
+      setTitle: (name) => { const t = $('#title'); if (t && document.activeElement !== t) t.value = name; },
+      onNotesChanged: syncNotes,
+    },
+    d.shared
+  );
+}
+
+window.artvas = { present: { start: presentNow, current: _present }, collab: collab._collab, openShare, video: _videoDebug, openVideo, pickVideoStarter, loadPack, state, addText, addShape, addImage, exportDesign, util, templateThumb, TEMPLATES, FORMATS, extras: { startCrop, finishCrop, setCrop: (r) => { if (state.crop) { state.crop.rect = { ...state.crop.rect, ...r }; clampCropRect(); placeCropBox(); } }, extractPalette, arrangeSelection, buildQR, addQR, setDuotone, curveLayout, ActiveSelection, duotoneClass: () => installDesignExtras.Duotone } };
 
 /** Put a file input made in code into the page (visually hidden) so phones open the picker. */
 function attachPicker(inp) {

@@ -20,7 +20,8 @@
     "https-proxy-agent": "7.0.6",
     "jspdf": "2.5.2",
     "msedge-tts": "2.1.1",
-    "qrcode-generator": "2.0.4"
+    "qrcode-generator": "2.0.4",
+    "ws": "8.23.0"
   },
   "devDependencies": {
     "vite": "5.4.21"
