@@ -25,6 +25,11 @@ Artvas is a free all-in-one creative studio that runs in the browser. It has a d
 - **Blend modes and opacity**: 16 blend modes for overlays (multiply, screen, overlay, soft light, difference…) and opacity for clips.
 - **Voice changer**: chipmunk, deep, robot, echo, telephone, megaphone, monster, cave, radio and underwater for voice-overs and clip sound. The voice keeps its timing.
 - **Extract audio** from any video clip onto its own audio track.
+- **Reverse** any video clip (up to 60 s), with its sound reversed too.
+- **Speed curves**: Montage, Hero, Bullet, Jump cut, Flash in, Flash out, or your own curve (0.1×–10×) with draggable points.
+- **Auto beat sync**: detect the beats in a music track, see beat marks on the timeline, cut your clips to every 1, 2 or 4 beats in one tap, and snap clip edges to beats.
+- **Stabilize** shaky clips (low, medium or high strength).
+- **Stock videos and music**: search free, openly licensed videos (Wikimedia Commons) in the Media tab and music (Openverse) in the Audio tab. Each item keeps its credit (title, author, licence).
 - **Filters and adjustments**: 26 filters (teal & orange, golden hour, noir, cinematic, cyber…) plus brightness, contrast, saturation, temperature, tint, fade, vignette and sharpen.
 - **Picture-in-picture**: put videos or photos on top of the main video, with green-screen (chroma key) removal, volume, circle crop and rotation.
 - **Keyframes**: animate the position, size and opacity of text, stickers and overlays between keyframes.
@@ -45,6 +50,9 @@ Artvas is a free all-in-one creative studio that runs in the browser. It has a d
 - **Crop**: crop any photo by dragging the crop box (mouse or touch) or with exact sliders, in free, original, 1:1, 4:5, 16:9 or 9:16 shapes.
 - **Duotone and photo colours**: six duotone presets or your own two colours, and the main colours of a photo shown as swatches in every colour picker.
 - **Align and space evenly**: align selected elements to each other and space three or more of them evenly.
+- **Present**: full-screen slideshow with animations, fade/slide/zoom transitions, autoplay, a laser pointer, speaker notes and a presenter view (current and next slide, notes, timer) in a second window.
+- **Share and edit together**: copy a view link or an edit link. People on the same edit link see each other's changes live, with named cursors and avatars. Shared designs are stored on the Artvas server in `DATA_DIR` (default `./data`); on Railway, mount a volume at `/data` and set `DATA_DIR=/data` so they survive redeploys.
+- **Free stock photos**: search openly licensed photos (Openverse, Wikimedia Commons) in the Photos tab. Optional: set `PEXELS_API_KEY` or `PIXABAY_API_KEY` to use those libraries instead.
 - **Uploads**: upload images, drag and drop them onto the canvas, or paste them from the clipboard. Your recent uploads are kept.
 - **Photos**: free stock photos (Lorem Picsum). Add a photo to the page or use it as the background.
 - **Draw**: freehand pen and eraser with adjustable size and color.

@@ -15,6 +15,11 @@ import { VOICES, speak, ONLINE_LANGS, speakOnline, faceFor } from './tts.js';
 import { fontsIn } from './fonts.js';
 import { VIDEO_FX, BODY_FX, FX_CATS, COLOR_FX, fxName, applyVideoFx, applyBodyFx, segmentCanvas, loadSegmenter, segState, fxThumb, loadFxSamples, fxSamplesReady, drawSample, drawFxFrame, bindCardPreview, layerCanvas, MASKS, maskIcon, DEFAULT_MASK, isMasked, maskLayer, strokeMaskGuide, BLEND_MODES, blendOp, LOOK_KEYS, hasLook, applyLook, VOICE_FX, voiceName, changeVoice } from './vfx.js';
 import { needsSite, inPreview as IN_PREVIEW } from './env.js';
+import { SPEED_CURVES, curveName, hasCurve, videoLen, srcTime, srcRate, avgSpeed, curveFactor, subCurve, flatCurve, curveThumb, mountCurveEditor } from './video-speed.js';
+import { reverseSupport, reverseVideo } from './video-reverse.js';
+import { detectBeats, trackBeats } from './video-beats.js';
+import { STAB_LEVELS, analyseMotion, corrections as stabCorrections, stabAt } from './video-stabilize.js';
+import { renderStockVideos, renderStockMusic, stopStockPreview, creditLine } from './video-stock.js';
 
 export const VIDEO_PRESETS = [
   { id: 'tiktok', name: 'TikTok', w: 1080, h: 1920, color: '#111111', hint: '9:16 · up to 10 min' },
@@ -173,8 +178,10 @@ const easeBack = (x) => {
 };
 
 function clipDur(c) {
-  return c.type === 'image' || c.type === 'color' ? c.dur : Math.max(0.1, (c.out - c.in) / (c.speed || 1));
+  return c.type === 'image' || c.type === 'color' ? c.dur : Math.max(0.1, videoLen(c));
 }
+/** Timeline seconds per source second of a video clip (1 / its average speed). */
+const timePerSrc = (c) => (hasCurve(c) ? curveFactor(c.curve.pts) : 1 / (c.speed || 1));
 function clipStarts() {
   let t = 0;
   return V.p.clips.map((c) => {
@@ -222,7 +229,7 @@ async function mediaURL(id) {
   if (!m) return null;
   const url = URL.createObjectURL(m.blob);
   V.urls.set(id, url);
-  V.meta.set(id, { type: m.type, name: m.name, duration: m.duration, w: m.w, h: m.h, thumb: m.thumb });
+  V.meta.set(id, { type: m.type, name: m.name, duration: m.duration, w: m.w, h: m.h, thumb: m.thumb, ...(m.credit ? { credit: m.credit } : {}) });
   return url;
 }
 
@@ -275,16 +282,21 @@ function probe(file, type) {
   });
 }
 
-async function importFile(file) {
+/** extra: more fields kept with the media (e.g. credit for stock files, duration when the file has none). */
+async function importFile(file, extra = {}) {
   const type = file.type.startsWith('video') ? 'video' : file.type.startsWith('audio') ? 'audio' : file.type.startsWith('image') ? 'image' : null;
   if (!type) return H.toast(`${file.name} is not a video, image or audio file`);
   const meta = await probe(file, type);
   if (!meta) return H.toast(`Could not read ${file.name}. Try MP4/WebM video, JPG/PNG images or MP3/WAV audio.`);
+  if (extra.duration && !(Number.isFinite(meta.duration) && meta.duration > 0)) meta.duration = extra.duration;
+  delete extra.duration;
+  if (!V) return null;
   const id = uid();
-  await saveMedia({ id, blob: file, type, name: file.name || type, ...meta });
+  await saveMedia({ id, blob: file, type, name: file.name || type, ...meta, ...extra });
+  if (!V) return null;
   V.p.mediaIds.push(id);
-  V.meta.set(id, { type, name: file.name, ...meta });
-  return { id, type, ...meta };
+  V.meta.set(id, { type, name: file.name, ...meta, ...extra });
+  return { id, type, ...meta, ...extra };
 }
 
 async function importFiles(files, { add = true } = {}) {
@@ -334,8 +346,10 @@ async function elFor(clip) {
   if (clip.type === 'color') return null;
   let el = V.els.get(clip.id);
   if (el && el._media === clip.mediaId) return el;
+  if (el instanceof HTMLMediaElement) el.pause();
   const url = await mediaURL(clip.mediaId);
   if (!url) return null;
+  if (V.els.get(clip.id)?._media === clip.mediaId) return V.els.get(clip.id);
   if (clip.type === 'image') {
     el = new Image();
     el.src = url;
@@ -344,11 +358,36 @@ async function elFor(clip) {
     el.preload = 'auto';
     el.playsInline = true;
     el.src = url;
+    trackFrameTime(el);
     wireAudio(el);
   }
   el._media = clip.mediaId;
   V.els.set(clip.id, el);
   return el;
+}
+/** Remember the source time of the frame the video is showing (stabilization uses it). */
+function trackFrameTime(el) {
+  if (!('requestVideoFrameCallback' in el)) return;
+  const cb = (_now, md) => {
+    el._ft = md.mediaTime;
+    el._ftAt = performance.now();
+    el.requestVideoFrameCallback(cb);
+  };
+  el.requestVideoFrameCallback(cb);
+}
+/** Source time of the frame drawImage(el) draws now. */
+function shownTime(el) {
+  // a VideoFrame made from the element holds exactly the frame that would be drawn
+  if (typeof VideoFrame === 'function' && el.readyState >= 2) {
+    try {
+      const vf = new VideoFrame(el);
+      const t = vf.timestamp / 1e6;
+      vf.close();
+      if (Math.abs(t - el.currentTime) < 0.3) return t;
+    } catch {}
+  }
+  const ft = el._ft;
+  return ft != null && Math.abs(ft - el.currentTime) < 0.25 ? ft : el.currentTime;
 }
 async function audioElFor(a) {
   let el = V.aels.get(a.id);
@@ -402,15 +441,25 @@ function sync(t, playing) {
     if (!(el instanceof HTMLVideoElement)) return;
     const isActive = act && act.clip === c;
     if (isActive) {
-      const target = clamp(c.in + (t - starts[i]) * (c.speed || 1), c.in, c.out - 0.02);
-      el.playbackRate = c.speed || 1;
+      const local = t - starts[i];
+      const target = clamp(srcTime(c, local), c.in, c.out - 0.02);
+      const curved = hasCurve(c);
+      // a speed curve: the rate follows the curve, nudged so the picture stays on time
+      const rate = clamp(srcRate(c, local), 0.0625, 16);
       setGain(el, c.muted ? 0 : c.volume ?? 1);
       if (playing) {
         if (el.paused) {
+          el.playbackRate = rate;
           el.currentTime = target;
           el.play().catch(() => {});
-        } else if (Math.abs(el.currentTime - target) > 0.35) el.currentTime = target;
+        } else {
+          const err = target - el.currentTime;
+          if (Math.abs(err) > (curved ? 0.5 : 0.35)) el.currentTime = target;
+          const want = curved ? clamp(rate * (1 + clamp(err * 1.5, -0.4, 0.4)), 0.0625, 16) : rate;
+          if (Math.abs(el.playbackRate - want) > want * 0.02) el.playbackRate = want;
+        }
       } else {
+        if (el.playbackRate !== rate) el.playbackRate = rate;
         if (!el.paused) el.pause();
         if (Math.abs(el.currentTime - target) > 0.04 && !el.seeking) el.currentTime = target;
       }
@@ -560,6 +609,13 @@ function drawMediaRaw(g, el, c, W, Hh, { alpha = 1, dx = 0, dy = 0, scale = 1, b
   g.rotate((((tf.rot || 0) + (tf.r || 0)) * Math.PI) / 180);
   if (onSpace) onSpace(g.getTransform());
   g.scale(tf.fx ? -1 : 1, tf.fy ? -1 : 1);
+  const st = stabFor(c, el);
+  if (st) {
+    // stabilization: undo the shake of this frame, zoomed in a little to hide the edges
+    g.scale(st.zoom, st.zoom);
+    g.rotate(st.rot);
+    g.translate(st.dx * sw * s0, st.dy * sh * s0);
+  }
   const bl = blur + fx.blur;
   g.filter = bl ? `${filt === 'none' ? '' : filt} blur(${bl}px)` : filt;
   if (fx.mirror) {
@@ -594,6 +650,19 @@ function drawMediaRaw(g, el, c, W, Hh, { alpha = 1, dx = 0, dy = 0, scale = 1, b
   }
   g.restore();
   if (fx.overlay) fx.overlay(g, W, Hh, alpha);
+}
+
+const stabCache = new WeakMap();
+/** Stabilization correction for the frame a clip's video is showing, or null. */
+function stabFor(c, el) {
+  const s = c.stab;
+  if (!s || c.type !== 'video' || s.mediaId !== c.mediaId || !(el instanceof HTMLVideoElement)) return null;
+  let k = stabCache.get(s);
+  if (!k || k.level !== s.level) {
+    k = { ...stabCorrections(s, s.level), t0: s.t0, fps: s.fps, level: s.level };
+    stabCache.set(s, k);
+  }
+  return stabAt(k, shownTime(el));
 }
 
 /** Per-clip effect at local time t (seconds into the clip). */
@@ -1289,7 +1358,13 @@ function splitAtPlayhead() {
       b.dur = s.dur - local;
       s.dur = local;
     } else {
-      const cut = s.in + local * (s.speed || 1);
+      const cut = srcTime(s, local);
+      if (hasCurve(s)) {
+        // each half keeps its own part of the speed curve
+        const u = (cut - s.in) / Math.max(1e-6, s.out - s.in);
+        b.curve = { ...s.curve, id: 'custom', pts: subCurve(s.curve.pts, u, 1) };
+        s.curve = { ...s.curve, id: 'custom', pts: subCurve(s.curve.pts, 0, u) };
+      }
       b.in = cut;
       s.out = cut;
     }
@@ -1331,7 +1406,9 @@ function replaceClip(c) {
     } else {
       c.type = 'video';
       c.in = 0;
-      c.out = Math.min(m.duration, Math.max(0.5, keep * (c.speed || 1)));
+      c.out = Math.min(m.duration, Math.max(0.5, keep / timePerSrc(c)));
+      delete c.rev;
+      delete c.stab;
       delete c.dur;
     }
     V.els.delete(c.id);
@@ -1360,7 +1437,12 @@ async function freezeFrame() {
   const freeze = { id: uid(), type: 'image', mediaId: m.id, dur: 2, speed: 1, fit: src.fit, filter: src.filter, adjust: { ...(src.adjust || {}) }, effect: 'none', tf: src.tf ? { ...src.tf } : undefined, opacity: src.opacity, mask: src.mask ? { ...src.mask } : undefined, transition: { type: 'none', dur: 0.5 } };
   if (local > 0.1 && local < clipDur(src) - 0.1) {
     const b = { ...structuredClone(src), id: uid(), transition: { type: 'none', dur: 0.5 } };
-    const cut = src.in + local * (src.speed || 1);
+    const cut = srcTime(src, local);
+    if (hasCurve(src)) {
+      const u = (cut - src.in) / Math.max(1e-6, src.out - src.in);
+      b.curve = { ...src.curve, id: 'custom', pts: subCurve(src.curve.pts, u, 1) };
+      src.curve = { ...src.curve, id: 'custom', pts: subCurve(src.curve.pts, 0, u) };
+    }
     b.in = cut;
     src.out = cut;
     V.p.clips.splice(i + 1, 0, freeze, b);
@@ -2049,7 +2131,7 @@ function renderTimeline() {
       const bg = c.type === 'color' ? `background:${c.color}` : m.thumb ? `background-image:url(${m.thumb})` : '';
       const name = c.type === 'color' ? (c.slot ? `Clip ${c.slot}` : 'Color') : m.name || c.type;
       return `<div class="tl-block clip ${isSel('clip', c.id) ? 'sel' : ''}" data-kind="clip" data-id="${c.id}" style="left:${starts[i] * pps}px;width:${Math.max(6, d * pps - 2)}px;${bg}">
-        ${tr}<span class="tl-label">${H.esc(name)} · ${d.toFixed(1)}s${c.speed && c.speed !== 1 ? ` · ${c.speed}×` : ''}${c.effect && c.effect !== 'none' ? ' · ✦' : ''}</span><i class="h-l"></i><i class="h-r"></i></div>`;
+        ${tr}<span class="tl-label">${H.esc(name)} · ${d.toFixed(1)}s${hasCurve(c) ? ` · ${H.esc(curveName(c.curve.id))}` : c.speed && c.speed !== 1 ? ` · ${c.speed}×` : ''}${c.rev ? ' · ⟲' : ''}${c.stab && c.stab.mediaId === c.mediaId ? ' · ◎' : ''}${c.effect && c.effect !== 'none' ? ' · ✦' : ''}</span><i class="h-l"></i><i class="h-r"></i></div>`;
     })
     .join('');
   const ovBlocks = ov.out
@@ -2071,7 +2153,7 @@ function renderTimeline() {
     .join('');
   const auBlocks = au.out
     .map(([a, l]) => `<div class="tl-block au ${isSel('audio', a.id) ? 'sel' : ''}" data-kind="audio" data-id="${a.id}" style="left:${a.start * pps}px;width:${Math.max(6, (a.out - a.in) * pps - 2)}px;top:${l * 30}px">
-      <span class="tl-label">♪ ${H.esc(a.name || 'Audio')}${a.voice ? ` · ${H.esc(voiceName(a.voice))}` : ''}</span><i class="h-l"></i><i class="h-r"></i></div>`)
+      ${beatMarks(a, pps)}<span class="tl-label">♪ ${H.esc(a.name || 'Audio')}${a.voice ? ` · ${H.esc(voiceName(a.voice))}` : ''}${a.bpm ? ` · ${Math.round(a.bpm)} BPM` : ''}</span><i class="h-l"></i><i class="h-r"></i></div>`)
     .join('');
   inner.style.width = `${width}px`;
   inner.innerHTML = `
@@ -2083,6 +2165,17 @@ function renderTimeline() {
     <div class="tl-playhead" id="tlPlayhead" style="transform:translateX(${V.t * pps}px)"><i></i></div>`;
   bindTimeline(inner);
 }
+
+/** Small beat markers inside an audio block (every 2nd/4th one when zoomed far out). */
+function beatMarks(a, pps) {
+  const bs = (a.beats || []).filter((b) => b >= a.in && b <= a.out);
+  if (!bs.length) return '';
+  const gap = bs.length > 1 ? ((bs[bs.length - 1] - bs[0]) / (bs.length - 1)) * pps : 99;
+  const every = gap >= 5 ? 1 : gap >= 2.5 ? 2 : 4;
+  return `<span class="tl-beats" aria-hidden="true">${bs.filter((_, i) => i % every === 0).map((b, i) => `<i class="${(i * every) % 4 === 0 ? 'bar' : ''}" style="left:${((b - a.in) * pps).toFixed(1)}px"></i>`).join('')}</span>`;
+}
+/** Beat times on the timeline from every audio track that has them. */
+const allBeats = () => V.p.audio.flatMap(trackBeats).sort((x, y) => x - y);
 
 function bindTimeline(inner) {
   const pps = V.pps;
@@ -2164,12 +2257,29 @@ function bindTimeline(inner) {
             b.classList.add('dragging');
             return;
           }
-          if (item.type === 'image') {
+          const sp = item.type === 'video' ? 1 / timePerSrc(item) : 1;
+          if (item.type === 'image' || item.type === 'color') {
             item.dur = clamp(orig.dur + (mode === 'r' ? dt : -dt), 0.3, 120);
           } else if (mode === 'l') {
-            item.in = clamp(orig.in + dt * (item.speed || 1), 0, item.out - 0.2);
+            item.in = clamp(orig.in + dt * sp, 0, item.out - 0.2);
           } else {
-            item.out = clamp(orig.out + dt * (item.speed || 1), item.in + 0.2, meta.duration || orig.out);
+            item.out = clamp(orig.out + dt * sp, item.in + 0.2, meta.duration || orig.out);
+          }
+          // snap the clip's end to a beat marker within ~8 px
+          const beats = allBeats();
+          b.classList.remove('snap');
+          if (beats.length) {
+            const ci = V.p.clips.indexOf(item);
+            const end = clipStarts()[ci] + clipDur(item);
+            let near = beats[0];
+            for (const x of beats) if (Math.abs(x - end) < Math.abs(near - end)) near = x;
+            const delta = near - end;
+            if (Math.abs(delta) * pps <= 8 && Math.abs(delta) > 1e-4) {
+              if (item.type === 'image' || item.type === 'color') item.dur = Math.max(0.3, item.dur + delta);
+              else if (mode === 'l') item.in = clamp(item.in - delta * sp, 0, item.out - 0.2);
+              else item.out = clamp(item.out + delta * sp, item.in + 0.2, meta.duration || item.out + delta * sp);
+              b.classList.add('snap');
+            }
           }
         } else if (kind === 'overlay' || kind === 'effect') {
           if (mode === 'm') item.start = Math.max(0, orig.start + dt);
@@ -2191,6 +2301,7 @@ function bindTimeline(inner) {
       b.onpointerup = (ev) => {
         b.onpointermove = null;
         b.onpointerup = null;
+        b.classList.remove('snap');
         const pinched = V.pinching || V.touches > 1 || Date.now() - (V.pinchEnd || 0) < 400;
         if (pinched) {
           if (moved) Object.assign(item, structuredClone(orig));
@@ -2259,10 +2370,32 @@ async function renderPanel() {
       <p class="muted">Or drag files anywhere onto the editor. Click a file to add it to the end of your video.</p>
       <div class="link-import"><input class="search" id="vLink" type="url" placeholder="Paste a link to a video, photo or audio file" spellcheck="false"><button class="btn ghost small" id="vLinkGo">Add</button></div>
       <p class="muted small-note" id="vLinkStatus">Works with direct file links (ending in .mp4, .mov, .webm, .mp3, .jpg…).</p>
-      <div class="v-media">${items.map(([id, m]) => `<div class="v-media-wrap"><button class="v-media-item" data-mid="${id}" title="Add ${H.esc(m.name)} to the end">${m.thumb ? `<img src="${m.thumb}" alt="">` : ''}<span>${m.type === 'video' ? fmt(m.duration).replace(/\.\d$/, '') : 'Photo'}</span></button><button class="v-pip" data-pip="${id}" title="Add as overlay (picture-in-picture)">PiP</button></div>`).join('') || '<p class="muted">Nothing imported yet.</p>'}</div>
+      <div class="v-media">${items.map(([id, m]) => `<div class="v-media-wrap"><button class="v-media-item" data-mid="${id}" title="Add ${H.esc(m.name)} to the end${m.credit ? ` · ${H.esc(creditLine(m.credit))}` : ''}">${m.thumb ? `<img src="${m.thumb}" alt="">` : ''}<span>${m.type === 'video' ? fmt(m.duration).replace(/\.\d$/, '') : 'Photo'}</span></button><button class="v-pip" data-pip="${id}" title="Add as overlay (picture-in-picture)">PiP</button></div>`).join('') || '<p class="muted">Nothing imported yet.</p>'}</div>
       <p class="muted mt"><b>PiP</b> puts a video or photo on top of your main video — use it for reactions, logos or green-screen clips.</p>
       <h4>Blank clip</h4>
-      <div class="row"><input type="color" id="vColorClip" value="#111111"><button class="btn ghost small" id="vAddColor">Add color clip (3s)</button></div>`;
+      <div class="row"><input type="color" id="vColorClip" value="#111111"><button class="btn ghost small" id="vAddColor">Add color clip (3s)</button></div>
+      <h4 id="vStockHead">Stock videos</h4>
+      <p class="muted">Free videos to use in your edits. Tap one to add it to the end.</p>
+      <div id="vStock" class="stock"></div>`;
+    renderStockVideos($('#vStock', p), {
+      H, inPreview: IN_PREVIEW,
+      addVideo: async (file, credit) => {
+        const m = await importFile(file, { credit });
+        if (!m) return;
+        if (m.type !== 'video') return H.toast('That file is not a video');
+        const wasEmpty = !V.p.clips.length;
+        addClip(m.id, 'video', m.duration);
+        if (wasEmpty) fitTimeline();
+        commit();
+        H.toast(`Added “${credit.title || 'stock video'}”`);
+        if (V.tab === 'media') {
+          // show it in the imported list, keeping the panel where it was scrolled to
+          const top = p.scrollTop;
+          await renderPanel();
+          p.scrollTop = top;
+        }
+      },
+    });
     const go = () => importFromLink($('#vLink', p).value.trim(), (m) => { const st = $('#vLinkStatus'); if (st) st.textContent = m; });
     $('#vLinkGo', p).onclick = go;
     $('#vLink', p).onkeydown = (e) => e.key === 'Enter' && go();
@@ -2352,10 +2485,27 @@ function renderAudioPanel(p) {
   const sec = a.section;
   const imported = V.p.mediaIds.map((id) => [id, V.meta.get(id)]).filter(([, m]) => m && m.type === 'audio');
   p.innerHTML = `<h3>Audio</h3>
-    <div class="seg full">${[['music', 'Music'], ['sfx', 'Sound effects'], ['tts', 'Text to speech'], ['mine', 'My audio']].map(([id, l]) => `<button data-asec="${id}" class="${sec === id ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <div class="seg full wrap">${[['music', 'Music'], ['stock', 'Stock music'], ['sfx', 'Sound effects'], ['tts', 'Text to speech'], ['mine', 'My audio']].map(([id, l]) => `<button data-asec="${id}" class="${sec === id ? 'on' : ''}">${l}</button>`).join('')}</div>
     <div id="auBody" class="mt"></div>`;
-  $$('[data-asec]', p).forEach((b) => (b.onclick = () => { a.section = b.dataset.asec; stopPreview(); renderAudioPanel(p); }));
+  $$('[data-asec]', p).forEach((b) => (b.onclick = () => { a.section = b.dataset.asec; stopPreview(); stopStockPreview(); renderAudioPanel(p); }));
   const body = $('#auBody', p);
+  if (sec === 'stock') {
+    body.innerHTML = `<p class="muted">Free music from the stock library. ▶ to listen, Add puts it at the playhead.</p><div id="auStock" class="stock"></div>`;
+    renderStockMusic($('#auStock', body), {
+      H, inPreview: IN_PREVIEW,
+      addAudio: async (file, credit) => {
+        const m = await importFile(file, { credit });
+        if (!m) return;
+        if (m.type !== 'audio') return H.toast('That file is not audio');
+        addAudio(m.id, m.duration, V.t >= totalDur() - 0.1 ? 0 : V.t);
+        const au = V.p.audio[V.p.audio.length - 1];
+        au.name = credit.title || au.name;
+        commit();
+        H.toast(`Added “${credit.title || 'music'}”`);
+      },
+    });
+    return;
+  }
 
   if (sec === 'music') {
     const vlen = mainDur() ? Math.max(5, Math.ceil(mainDur())) : 30;
@@ -3001,7 +3151,7 @@ async function runAutoCaptions(p, file) {
     jobs.push({ blob: file, inSec: 0, at: V.t >= totalDur() - 0.1 ? 0 : V.t, speed: 1, keep: true });
   } else {
     V.p.clips.forEach((clip, i) => {
-      if (clip.type === 'video' && !clip.muted) jobs.push({ mediaId: clip.mediaId, inSec: clip.in, outSec: clip.out, at: starts[i], speed: clip.speed || 1 });
+      if (clip.type === 'video' && !clip.muted) jobs.push({ mediaId: clip.mediaId, inSec: clip.in, outSec: clip.out, at: starts[i], speed: avgSpeed(clip) });
     });
     V.p.overlays.forEach((o) => {
       if (o.type === 'video' && !o.muted) jobs.push({ mediaId: o.mediaId, inSec: o.in || 0, outSec: (o.in || 0) + o.dur, at: o.start, speed: 1 });
@@ -3234,7 +3384,7 @@ async function applyVoiceToClip(c, preset) {
     return H.toast('Original voice restored');
   }
   await runVoice(async () => {
-    const sp = c.speed || 1;
+    const sp = avgSpeed(c);
     const name = V.meta.get(c.mediaId)?.name || 'Clip';
     const meta = await renderVoice(c.mediaId, preset, { from: c.in, to: c.out, speed: sp }, name);
     const idx = V.p.clips.indexOf(c);
@@ -3253,7 +3403,7 @@ function extractAudio(c) {
   if (c.type !== 'video') return;
   const idx = V.p.clips.indexOf(c);
   if (idx < 0) return;
-  const sp = c.speed || 1;
+  const sp = +avgSpeed(c).toFixed(2);
   const name = (V.meta.get(c.mediaId)?.name || 'Clip').replace(/\.\w+$/, '');
   const a = { id: uid(), mediaId: c.mediaId, start: clipStarts()[idx], in: c.in, out: c.out, volume: c.volume ?? 1, fadeIn: 0, fadeOut: 0, name: `${name} audio`, fromClip: c.id };
   V.p.audio.push(a);
@@ -3262,6 +3412,253 @@ function extractAudio(c) {
   V.sel = { kind: 'audio', id: a.id };
   commit();
   H.toast(sp !== 1 ? `Audio extracted at normal speed (1×) — the clip plays at ${sp}×` : 'Audio extracted to its own track — the clip is muted');
+}
+
+// ---------- speed curves, reverse, stabilize (video clips) ----------
+const CONST_SPEEDS = [0.25, 0.5, 1, 1.5, 2, 3];
+function speedSection(s) {
+  const curved = hasCurve(s);
+  const cur = curved ? s.curve.id : 'none';
+  const sup = reverseSupport();
+  const busy = V.job && V.job.clip === s.id ? V.job : null;
+  return `<h4>Speed</h4>
+    <div class="field"><label>Constant speed</label><div class="seg wrap">${CONST_SPEEDS.map((v) => `<button data-spd="${v}" class="${!curved && (s.speed || 1) === v ? 'on' : ''}">${v}×</button>`).join('')}</div></div>
+    <div class="field"><label>Speed curve</label>
+      <div class="curve-grid">${[{ id: 'none', name: 'None' }, ...SPEED_CURVES, { id: 'custom', name: 'Custom' }].map((c) => `<button type="button" data-curve="${c.id}" class="${cur === c.id ? 'on' : ''}" aria-pressed="${cur === c.id}">${c.id === 'none' ? curveThumb([[0, 1], [1, 1]]) : c.id === 'custom' ? curveThumb(curved && cur === 'custom' ? s.curve.pts : [[0, 1], [0.3, 0.4], [0.7, 3], [1, 1]]) : curveThumb(c.pts)}<span>${c.name}</span></button>`).join('')}</div>
+      ${curved ? `<div class="sc-edit" id="cCurveEd"></div>
+        <p class="muted small-note" id="cCurveInfo">${curveInfo(s)}</p>
+        <div class="row wrap"><button class="btn ghost small" id="cCurveFlat">Reset points</button><button class="btn ghost small" id="cCurveOff">Remove curve</button></div>` : ''}
+    </div>
+    <div class="row wrap"><button class="btn ghost small" id="cReverse" ${busy ? 'disabled' : ''}>⟲ ${s.rev ? 'Play forward (original)' : 'Reverse'}</button></div>
+    <p class="muted small-note">${s.rev ? 'This clip plays backwards (sound too).' : sup.max ? `Reverse makes a backwards copy of this clip (up to ${sup.max}s).` : 'Reverse needs a newer browser.'}</p>
+    <p class="muted vc-status job-status" data-job="reverse" aria-live="polite">${H.esc(busy?.kind === 'reverse' ? busy.msg : '')}</p>`;
+}
+function stabSection(s) {
+  const busy = V.job && V.job.clip === s.id ? V.job : null;
+  const stabOn = s.stab && s.stab.mediaId === s.mediaId;
+  return `<h4>Stabilize</h4>
+    <p class="muted small-note">Smooths shaky footage. Higher strength zooms in a little more.</p>
+    <div class="seg">${STAB_LEVELS.map(([id, l]) => `<button data-stab="${id}" class="${stabOn && s.stab.level === id ? 'on' : ''}" ${busy ? 'disabled' : ''}>${l}</button>`).join('')}</div>
+    ${stabOn ? `<button class="btn ghost small mt" id="cStabOff" ${busy ? 'disabled' : ''}>Remove stabilization</button>` : ''}
+    <p class="muted vc-status job-status" data-job="stab" aria-live="polite">${H.esc(busy?.kind === 'stab' ? busy.msg : '')}</p>`;
+}
+function curveInfo(s) {
+  return `Drag the points — higher is faster (0.1×–10×). Clip length ${clipDur(s).toFixed(1)}s, average ${avgSpeed(s).toFixed(2)}×. The sound follows the speed.`;
+}
+function bindSpeedSection(el, s) {
+  $$('[data-curve]', el).forEach((b) => (b.onclick = () => {
+    const id = b.dataset.curve;
+    if (id === 'none') delete s.curve;
+    else if (id === 'custom') s.curve = { id: 'custom', pts: hasCurve(s) ? structuredClone(s.curve.pts) : flatCurve(s.speed || 1) };
+    else s.curve = { id, pts: structuredClone(SPEED_CURVES.find((c) => c.id === id).pts) };
+    commit();
+    if (id !== 'none') previewRange(clipStarts()[V.p.clips.indexOf(s)], clipStarts()[V.p.clips.indexOf(s)] + Math.min(clipDur(s), 6));
+  }));
+  const ed = $('#cCurveEd', el);
+  if (ed && hasCurve(s)) {
+    mountCurveEditor(ed, s.curve.pts, {
+      onInput: () => {
+        s.curve.id = 'custom';
+        $('#cLen', el) && ($('#cLen', el).textContent = clipDur(s).toFixed(1));
+        $('#cCurveInfo', el) && ($('#cCurveInfo', el).textContent = curveInfo(s));
+        renderTimelineLive();
+      },
+      onChange: () => commit(),
+    });
+  }
+  const on = (id, fn) => { const x = $(id, el); if (x) x.onclick = fn; };
+  on('#cCurveFlat', () => { s.curve = { id: 'custom', pts: flatCurve(1) }; commit(); });
+  on('#cCurveOff', () => { delete s.curve; commit(); });
+  on('#cReverse', () => reverseClip(s));
+  $$('[data-stab]', el).forEach((b) => (b.onclick = () => stabilizeClip(s, b.dataset.stab)));
+  on('#cStabOff', () => { delete s.stab; commit(); H.toast('Stabilization removed'); });
+}
+function jobStatus(msg) {
+  if (!V?.job) return;
+  V.job.msg = msg;
+  const e = $(`.job-status[data-job="${V.job.kind}"]`);
+  if (e) e.textContent = msg;
+}
+async function runClipJob(c, kind, fn) {
+  if (V.job) return H.toast('Still working on the last clip…');
+  V.job = { clip: c.id, kind, msg: '' };
+  renderInspector();
+  try {
+    await fn();
+  } finally {
+    if (V) {
+      V.job = null;
+      renderInspector();
+    }
+  }
+}
+/** Reverse a video clip (or go back to the original). The original media and range are kept in c.rev. */
+async function reverseClip(c) {
+  if (c.type !== 'video') return;
+  if (c.rev) {
+    const r = c.rev;
+    // remember the reversed copy so reversing the same part again is instant
+    c.revCache = { src: r.mediaId, in: r.in, out: r.out, media: c.mediaId, dur: c.out };
+    Object.assign(c, { mediaId: r.mediaId, in: r.in, out: r.out });
+    delete c.rev;
+    await prepareAll();
+    commit();
+    return H.toast('Playing forward again');
+  }
+  const len = c.out - c.in;
+  const sup = reverseSupport();
+  if (!sup.max) return H.toast('Reverse needs a newer browser (Chrome, Edge, Firefox or Safari 17+)');
+  if (len > sup.max + 0.05) return H.toast(`Reverse works on clips up to ${sup.max}s — split or trim this clip first (it is ${len.toFixed(1)}s of video)`);
+  const rc = c.revCache;
+  const apply = async (mediaId, dur) => {
+    c.rev = { mediaId: c.mediaId, in: c.in, out: c.out };
+    Object.assign(c, { mediaId, in: 0, out: Math.max(0.1, dur) });
+    await prepareAll();
+    commit();
+  };
+  if (rc && rc.src === c.mediaId && Math.abs(rc.in - c.in) < 1e-3 && Math.abs(rc.out - c.out) < 1e-3 && V.meta.has(rc.media)) {
+    await apply(rc.media, rc.dur);
+    return H.toast('Reversed');
+  }
+  await runClipJob(c, 'reverse', async () => {
+    try {
+      const m = await getMedia(c.mediaId);
+      if (!m?.blob) throw new Error('missing media');
+      const t0 = performance.now();
+      const r = await reverseVideo(m.blob, c.in, c.out, { onProgress: (_f, msg) => jobStatus(msg) });
+      if (!V) return;
+      V.lastJob = { kind: 'reverse', ms: Math.round(performance.now() - t0), method: r.method, stats: r.stats, size: [r.width, r.height] };
+      jobStatus('Saving…');
+      const name = (V.meta.get(c.mediaId)?.name || 'Clip').replace(/\.\w+$/, '');
+      const meta = await importFile(new File([r.blob], `${name} (reversed).${r.blob.type.includes('mp4') ? 'mp4' : 'webm'}`, { type: r.blob.type || 'video/webm' }), { duration: r.duration, reverseOf: c.mediaId });
+      if (!meta || !V.p.clips.includes(c)) return;
+      await apply(meta.id, Math.min(r.duration, meta.duration || r.duration));
+      H.toast(`Reversed in ${((performance.now() - t0) / 1000).toFixed(1)}s${r.hasAudio ? '' : ' (no sound to reverse)'}`);
+    } catch (e) {
+      console.warn('reverse', e);
+      if (V) H.toast(/too long/.test(e.message) ? `Reverse works on clips up to ${sup.max}s` : 'Could not reverse this clip');
+    }
+  });
+}
+/** Analyse the clip's motion (once per media and range) and turn on stabilization at a strength. */
+async function stabilizeClip(c, level) {
+  if (c.type !== 'video') return;
+  const st = c.stab;
+  if (st && st.mediaId === c.mediaId && st.from <= c.in + 0.05 && st.to >= c.out - 0.05) {
+    c.stab = { ...st, level };
+    commit();
+    return H.toast(`Stabilize: ${STAB_LEVELS.find(([id]) => id === level)[1]}`);
+  }
+  await runClipJob(c, 'stab', async () => {
+    try {
+      const m = await getMedia(c.mediaId);
+      if (!m?.blob) throw new Error('missing media');
+      const dur = V.meta.get(c.mediaId)?.duration || c.out;
+      const from = Math.max(0, c.in - 0.25);
+      const to = Math.min(Number.isFinite(dur) ? dur : c.out, c.out + 0.25);
+      const t0 = performance.now();
+      const path = await analyseMotion(m.blob, from, to, { onProgress: (_f, msg) => jobStatus(msg) });
+      if (!V) return;
+      V.lastJob = { kind: 'stab', ms: Math.round(performance.now() - t0), method: path.method, frames: path.frames, samples: path.px.length };
+      if (!V.p.clips.includes(c)) return;
+      const r4 = (a) => a.map((x) => +x.toFixed(4));
+      c.stab = { mediaId: c.mediaId, from, to, level, t0: path.t0, fps: +path.fps.toFixed(4), px: r4(path.px), py: r4(path.py), pr: r4(path.pr) };
+      commit();
+      H.toast(`Stabilized in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+    } catch (e) {
+      console.warn('stabilize', e);
+      if (V) H.toast(/too long/.test(e.message) ? 'Stabilize works on clips up to 3 minutes — split this clip first' : 'Could not analyse this clip');
+    }
+  });
+}
+
+// ---------- beats (audio tracks) ----------
+function beatSection(a) {
+  const n = (a.beats || []).filter((b) => b >= a.in && b <= a.out).length;
+  const every = V.beatEvery || 1;
+  return `<h4>Beats</h4>
+    <p class="muted small-note">${a.beats ? `${n} beats · ${Math.round(a.bpm || 0)} BPM — shown as marks on the track; clip edges snap to them.` : 'Find the beats of this music, then cut your clips in time with it.'}</p>
+    <div class="row wrap"><button class="btn ghost small" id="aBeats" ${V.beatBusy ? 'disabled' : ''}>${a.beats ? 'Detect again' : '♩ Detect beats'}</button>${a.beats ? `<button class="btn ghost small" id="aBeatsClear">Clear beats</button>` : ''}</div>
+    ${a.beats ? `<div class="field mt"><label>Cut on</label><div class="seg">${[1, 2, 4].map((k) => `<button data-bev="${k}" class="${every === k ? 'on' : ''}">${k === 1 ? 'Every beat' : `Every ${k}`}</button>`).join('')}</div></div>
+      <button class="btn primary small" id="aAutoCut" ${V.p.clips.length ? '' : 'disabled'}>Auto cut to beat</button>` : ''}
+    <p class="muted vc-status" id="beatStatus" aria-live="polite">${H.esc(V.beatMsg || '')}</p>`;
+}
+function bindBeatSection(el, a) {
+  const b = $('#aBeats', el);
+  if (b) b.onclick = () => detectTrackBeats(a);
+  const c = $('#aBeatsClear', el);
+  if (c) c.onclick = () => { delete a.beats; delete a.bpm; V.beatMsg = ''; commit(); };
+  $$('[data-bev]', el).forEach((x) => (x.onclick = () => { V.beatEvery = +x.dataset.bev; renderInspector(); }));
+  const ac = $('#aAutoCut', el);
+  if (ac) ac.onclick = () => autoCutToBeat(a, V.beatEvery || 1);
+}
+async function detectTrackBeats(a) {
+  if (V.beatBusy) return;
+  V.beatBusy = true;
+  V.beatMsg = 'Listening for the beat…';
+  renderInspector();
+  try {
+    const m = await getMedia(a.mediaId);
+    if (!m?.blob) throw new Error('missing media');
+    const t0 = performance.now();
+    const r = await detectBeats(await m.blob.arrayBuffer());
+    if (!V) return;
+    if (!r.beats.length) throw new Error('no beats');
+    a.beats = r.beats;
+    a.bpm = r.bpm;
+    V.beatMsg = `Found ${r.beats.length} beats at ${Math.round(r.bpm)} BPM in ${((performance.now() - t0) / 1000).toFixed(1)}s.`;
+    commit();
+  } catch (e) {
+    console.warn('beats', e);
+    if (V) V.beatMsg = 'Could not find a beat in this audio.';
+  } finally {
+    if (V) {
+      V.beatBusy = false;
+      renderInspector();
+    }
+  }
+}
+/**
+ * Set main-track clip lengths so every cut lands on a beat (every `every` beats), from the
+ * first beat of the track. Videos are trimmed at their end; clips too short to reach the next
+ * beat end on the last beat they can reach.
+ */
+function autoCutToBeat(a, every = 1) {
+  const B = trackBeats(a).filter((t) => t > 0.05);
+  if (!B.length || !V.p.clips.length) return H.toast('Detect the beats first');
+  let i = B.findIndex((t) => t >= a.start - 0.02);
+  if (i < 0) return H.toast('The music has no beats on the timeline');
+  // the first clip runs from 0 to `every` beats after the first beat
+  let start = 0;
+  let cut = 0;
+  let short = 0;
+  for (const c of V.p.clips) {
+    let k = i + every;
+    if (k >= B.length) break;
+    const maxLen = c.type === 'video' ? ((V.meta.get(c.mediaId)?.duration || c.out) - c.in) * timePerSrc(c) : 120;
+    if (B[k] - start > maxLen + 1e-3) {
+      short++;
+      while (k > i + 1 && B[k] - start > maxLen) k--;
+      if (B[k] - start > maxLen) {
+        // not even one beat fits: use the whole clip and aim for the next beat after it
+        const end = start + maxLen;
+        setClipLen(c, maxLen);
+        start = end;
+        while (i < B.length - 1 && B[i + 1] <= end + 1e-3) i++;
+        continue;
+      }
+    }
+    setClipLen(c, B[k] - start);
+    start = B[k];
+    i = k;
+    cut++;
+  }
+  commit();
+  H.toast(`${cut} clip${cut === 1 ? '' : 's'} cut to the beat${short ? ` · ${short} too short to reach the next beat` : ''}`);
+}
+function setClipLen(c, d) {
+  if (c.type === 'image' || c.type === 'color') c.dur = Math.max(0.1, +d.toFixed(4));
+  else c.out = c.in + d / timePerSrc(c);
 }
 
 function renderInspector() {
@@ -3306,15 +3703,17 @@ function renderInspector() {
     const idx = V.p.clips.indexOf(s);
     const tf = s.tf || {};
     el.innerHTML = `<h3>${s.type === 'image' ? 'Photo clip' : s.type === 'color' ? (s.slot ? `Template clip ${s.slot}` : 'Color clip') : 'Video clip'}</h3>
-      <p class="muted">${H.esc(m.name || '')} · ${clipDur(s).toFixed(1)}s on the timeline</p>
+      <p class="muted">${H.esc(m.name || '')} · <span id="cLen">${clipDur(s).toFixed(1)}</span>s on the timeline</p>
+      ${m.credit ? `<p class="muted small-note credit">${H.esc(creditLine(m.credit))}${m.credit.link ? ` · <a href="${H.esc(m.credit.link)}" target="_blank" rel="noopener">source</a>` : ''}</p>` : ''}
       <div class="row wrap"><button class="btn ${s.type === 'color' ? 'primary' : 'ghost'} small" id="cReplace">${H.icon('upload', 14)} ${s.type === 'color' ? 'Add your clip' : 'Replace'}</button>
         ${s.type === 'video' ? `<button class="btn ghost small" id="cFreeze">Freeze frame</button>` : ''}</div>
       ${s.type === 'color' ? `<div class="field mt"><label>Color</label><input type="color" id="cColor" value="${/^#/.test(s.color || '') ? s.color : '#222222'}"></div>` : ''}
       ${s.type === 'image' || s.type === 'color'
         ? `<div class="field"><label>Duration <b>${s.dur.toFixed(1)}s</b></label><input type="range" id="cDur" min="0.5" max="15" step="0.1" value="${s.dur}"></div>`
-        : `<div class="field"><label>Speed</label><div class="seg wrap">${[0.25, 0.5, 1, 1.5, 2, 3].map((v) => `<button data-spd="${v}" class="${(s.speed || 1) === v ? 'on' : ''}">${v}×</button>`).join('')}</div></div>
+        : `${speedSection(s)}
            <div class="field"><label>Volume <b>${Math.round((s.volume ?? 1) * 100)}%</b></label><input type="range" id="cVol" min="0" max="2" step="0.05" value="${s.volume ?? 1}"></div>
-           <label class="row"><input type="checkbox" id="cMute" ${s.muted ? 'checked' : ''}> Mute clip sound</label>`}
+           <label class="row"><input type="checkbox" id="cMute" ${s.muted ? 'checked' : ''}> Mute clip sound</label>
+           ${stabSection(s)}`}
       <div class="field mt"><label>Framing</label><div class="seg"><button data-fit="fill" class="${s.fit !== 'fit' ? 'on' : ''}">Fill frame</button><button data-fit="fit" class="${s.fit === 'fit' ? 'on' : ''}">Fit + blur</button></div></div>
       <div class="field"><label>Opacity <b>${Math.round((s.opacity ?? 1) * 100)}%</b></label><input type="range" id="cOp" min="0" max="1" step="0.01" value="${s.opacity ?? 1}"></div>
       ${s.type === 'video' ? `<h4>Sound</h4>
@@ -3372,7 +3771,8 @@ function renderInspector() {
     bindMask(el, s);
     $$('[data-voice]', el).forEach((b) => (b.onclick = () => applyVoiceToClip(s, b.dataset.voice)));
     on('#cDur', 'onchange', () => commit());
-    $$('[data-spd]', el).forEach((b) => (b.onclick = () => { s.speed = +b.dataset.spd; commit(); }));
+    $$('[data-spd]', el).forEach((b) => (b.onclick = () => { s.speed = +b.dataset.spd; delete s.curve; commit(); }));
+    if (s.type === 'video') bindSpeedSection(el, s);
     on('#cVol', 'oninput', (e) => { s.volume = +e.target.value; });
     on('#cVol', 'onchange', () => commit());
     on('#cMute', 'onchange', (e) => { s.muted = e.target.checked; commit(); });
@@ -3520,11 +3920,14 @@ function renderInspector() {
   }
   if (kind === 'audio') {
     const len = s.out - s.in;
+    const am = V.meta.get(s.mediaId) || V.meta.get(s.voiceSrc?.mediaId) || {};
     el.innerHTML = `<h3>Audio</h3><p class="muted">${H.esc(s.name || '')} · ${len.toFixed(1)}s</p>
+      ${am.credit ? `<p class="muted small-note credit">${H.esc(creditLine(am.credit))}${am.credit.link ? ` · <a href="${H.esc(am.credit.link)}" target="_blank" rel="noopener">source</a>` : ''}</p>` : ''}
       <div class="field"><label>Volume <b>${Math.round((s.volume ?? 1) * 100)}%</b></label><input type="range" id="aVol" min="0" max="2" step="0.05" value="${s.volume ?? 1}"></div>
       <div class="field"><label>Fade in <b>${(s.fadeIn || 0).toFixed(1)}s</b></label><input type="range" id="aIn" min="0" max="5" step="0.1" value="${s.fadeIn || 0}"></div>
       <div class="field"><label>Fade out <b>${(s.fadeOut || 0).toFixed(1)}s</b></label><input type="range" id="aOut" min="0" max="5" step="0.1" value="${s.fadeOut || 0}"></div>
       <div class="row wrap"><button class="btn ghost small" id="aFit">Trim to video length</button><button class="btn ghost small" id="aSplit">Split</button><button class="btn ghost small" id="aDel">Delete</button></div>
+      ${beatSection(s)}
       ${voiceSection(s.voice || 'none')}`;
     const on = (id, ev, fn) => { const x = $(id, el); if (x) x[ev] = fn; };
     on('#aVol', 'oninput', (e) => { s.volume = +e.target.value; });
@@ -3535,6 +3938,7 @@ function renderInspector() {
     on('#aSplit', 'onclick', splitAtPlayhead);
     on('#aDel', 'onclick', deleteSel);
     $$('[data-voice]', el).forEach((b) => (b.onclick = () => applyVoiceToTrack(s, b.dataset.voice)));
+    bindBeatSection(el, s);
   }
 }
 
