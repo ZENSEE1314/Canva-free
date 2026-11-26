@@ -29,6 +29,7 @@ Artvas is a free all-in-one creative studio that runs in the browser. It has a d
 - **Speed curves**: Montage, Hero, Bullet, Jump cut, Flash in, Flash out, or your own curve (0.1×–10×) with draggable points.
 - **Auto beat sync**: detect the beats in a music track, see beat marks on the timeline, cut your clips to every 1, 2 or 4 beats in one tap, and snap clip edges to beats.
 - **Stabilize** shaky clips (low, medium or high strength).
+- **Remove area**: hide burned-in captions, logos, date stamps or other text in your video. Draw a box (or pick Bottom captions, Top text or a corner) and choose Fill (fills from the surrounding picture), Blur, Pixelate or a solid colour, for any time range. Full-width bands at the top or bottom can also be cropped out.
 - **Stock videos and music**: search free, openly licensed videos (Wikimedia Commons) in the Media tab and music in the Audio tab from several libraries at once — Openverse (incl. Freesound and Jamendo tracks), Internet Archive netlabels and Wikimedia Commons — with 18 mood and genre shortcuts. Set `JAMENDO_CLIENT_ID` (free at devportal.jamendo.com) to add Jamendo's 600,000+ songs. Each item keeps its credit (title, author, licence, library).
 - **Filters and adjustments**: 26 filters (teal & orange, golden hour, noir, cinematic, cyber…) plus brightness, contrast, saturation, temperature, tint, fade, vignette and sharpen.
 - **Picture-in-picture**: put videos or photos on top of the main video, with green-screen (chroma key) removal, volume, circle crop and rotation.

@@ -76,3 +76,21 @@
   .stock-grid { grid-template-columns: repeat(3, 1fr); }
   .stock-chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
 }
+
+/* Remove area (erasers) */
+.tl-block.fx.erase { background: repeating-linear-gradient(135deg, #64748b 0 8px, #475569 8px 16px); }
+.fx-secs button { white-space: nowrap; }
+.fx-secs .ic { vertical-align: -2px; }
+.erase-draw { margin-top: 10px; justify-content: center; gap: 6px; }
+.erase-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
+.erase-grid button { border: 1px solid var(--line); background: #fff; border-radius: 10px; padding: 6px; cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--ink-2); min-width: 0; }
+.erase-grid button:hover { border-color: var(--brand); color: var(--brand); }
+.erase-grid button > span:last-child { display: block; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.erp-pic { position: relative; display: block; width: 100%; max-height: 90px; margin: 0 auto; border-radius: 6px; overflow: hidden; background: linear-gradient(160deg, #7dd3fc, #a78bfa 55%, #f0abfc); }
+.erp-pic i { position: absolute; border: 1.5px dashed #fff; background: rgba(29, 21, 48, .45); border-radius: 2px; }
+#vInspector h3:has(> .ic) { display: flex; align-items: center; gap: 6px; }
+@media (max-width: 760px) {
+  .fx-secs .fx-sec-x { display: none; }
+  .erase-grid { grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .erase-grid button { padding: 5px; }
+}

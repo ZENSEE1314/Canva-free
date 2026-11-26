@@ -34,7 +34,7 @@ const hr = (n) => {
 
 // ---------- scratch canvases ----------
 const pool = new Map();
-function scratch(name, w, h, opts) {
+export function scratch(name, w, h, opts) {
   const key = `${name}:${w}x${h}`;
   let c = pool.get(key);
   if (!c) {

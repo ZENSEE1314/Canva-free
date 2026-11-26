@@ -19,6 +19,7 @@ import { SPEED_CURVES, curveName, hasCurve, videoLen, srcTime, srcRate, avgSpeed
 import { reverseSupport, reverseVideo } from './video-reverse.js';
 import { detectBeats, trackBeats } from './video-beats.js';
 import { STAB_LEVELS, analyseMotion, corrections as stabCorrections, stabAt } from './video-stabilize.js';
+import { ERASE_MODES, ERASE_PRESETS, eraseModeName, presetRect, normRect, applyErasers, drawEraseGuide, eraseIcon } from './video-erase.js';
 import { renderStockVideos, renderStockMusic, stopStockPreview, creditLine } from './video-stock.js';
 
 export const VIDEO_PRESETS = [
@@ -257,10 +258,31 @@ function probe(file, type) {
       v.muted = true;
       v.preload = 'auto';
       v.playsInline = true;
-      v.onloadeddata = () => {
+      // WebM files recorded in a browser often have no length in their header (duration = Infinity):
+      // jumping far past the end makes the browser find the real length.
+      let fixing = false;
+      const thumbSeek = () => {
         v.currentTime = Math.min(0.5, (v.duration || 1) / 3);
       };
+      v.onloadeddata = () => {
+        if (!Number.isFinite(v.duration)) {
+          fixing = true;
+          v.currentTime = 1e7;
+          setTimeout(() => {
+            if (!fixing) return;
+            fixing = false;
+            thumbSeek();
+          }, 8000);
+        } else thumbSeek();
+      };
+      v.ondurationchange = () => {
+        if (fixing && Number.isFinite(v.duration)) {
+          fixing = false;
+          thumbSeek();
+        }
+      };
       v.onseeked = () => {
+        if (fixing) return;
         const c = document.createElement('canvas');
         const s = 160 / Math.max(v.videoWidth || 160, v.videoHeight || 90);
         c.width = Math.max(1, (v.videoWidth || 160) * s);
@@ -268,14 +290,20 @@ function probe(file, type) {
         try {
           c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
         } catch {}
-        done({ w: v.videoWidth, h: v.videoHeight, duration: v.duration, thumb: c.toDataURL('image/jpeg', 0.7) });
+        done({ w: v.videoWidth, h: v.videoHeight, duration: Number.isFinite(v.duration) ? v.duration : 0, thumb: c.toDataURL('image/jpeg', 0.7) });
       };
       v.onerror = () => done(null);
       v.src = url;
     } else {
       const a = document.createElement('audio');
       a.preload = 'metadata';
-      a.onloadedmetadata = () => done({ duration: a.duration });
+      a.onloadedmetadata = () => {
+        if (Number.isFinite(a.duration)) return done({ duration: a.duration });
+        // same fix as for videos: find the real length of a file with none in its header
+        a.ondurationchange = () => Number.isFinite(a.duration) && done({ duration: a.duration });
+        a.currentTime = 1e7;
+        setTimeout(() => done({ duration: Number.isFinite(a.duration) ? a.duration : 0 }), 8000);
+      };
       a.onerror = () => done(null);
       a.src = url;
     }
@@ -926,8 +954,12 @@ function drawClipWithTransition(g, W, Hh, t) {
 
 /** Effect layers (video & body effects) that cover time t, applied to the picture under them. */
 function applyEffectLayers(g, W, Hh, t, preview) {
-  const list = (V.p.effects || []).filter((e) => t >= e.start && t < e.start + e.dur);
-  if (!list.length) return;
+  const all = (V.p.effects || []).filter((e) => t >= e.start && t < e.start + e.dur);
+  if (!all.length) return;
+  // "Remove area" layers clean the picture first, so other effects work on the cleaned frame
+  // (while exporting, the preview behind the progress box skips them: the export frame needs the time)
+  if (!(preview && (V.eraseOff || V.exporting))) applyErasers(g, W, Hh, all.filter((e) => e.kind === 'erase'), t);
+  const list = all.filter((e) => e.kind !== 'erase');
   let mask;
   for (const e of list) {
     const o = { local: t - e.start, dur: e.dur, amt: e.amount ?? 1, color: e.color };
@@ -1192,6 +1224,10 @@ function renderFrame(g, W, Hh, t, { preview = false } = {}) {
       g.restore();
       V.handle = { x: sel.x + sel.w, y: sel.y + sel.h, r: r * 1.8 };
     } else V.handle = null;
+    // the selected "Remove area" box (preview only, while paused)
+    const er = V.sel?.kind === 'effect' ? findSel() : null;
+    V.eraseBox = er?.kind === 'erase' && er.rect && (!V.playing || V.eraseDrag) && !V.exporting ? drawEraseGuide(g, W, Hh, er, t >= er.start && t < er.start + er.dur) : null;
+    if (V.eraseDraw && V.eraseDraw.rect) drawEraseGuide(g, W, Hh, { rect: V.eraseDraw.rect }, true);
     if (!V.p.clips.length && !V.p.overlays.length) {
       g.save();
       g.fillStyle = 'rgba(255,255,255,0.75)';
@@ -1855,6 +1891,7 @@ function onKey(e) {
   if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) return;
   const mod = e.ctrlKey || e.metaKey;
   const k = e.key.toLowerCase();
+  if (k === 'escape' && V.eraseDraw) { e.preventDefault(); cancelEraseDraw(); return; }
   if (k === ' ') { e.preventDefault(); setPlaying(!V.playing); }
   else if (mod && k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   else if ((mod && k === 'y') || (mod && e.shiftKey && k === 'z')) { e.preventDefault(); redo(); }
@@ -1863,6 +1900,122 @@ function onKey(e) {
   else if (k === 's' && !mod) splitAtPlayhead();
   else if (k === 'arrowleft') seek(V.t - (e.shiftKey ? 1 : 1 / 30));
   else if (k === 'arrowright') seek(V.t + (e.shiftKey ? 1 : 1 / 30));
+}
+
+// ---------- "Remove area" boxes on the preview ----------
+/** Move / resize / draw an eraser box while dragging (p in canvas pixels). */
+function eraseDragTo(d, p) {
+  const nx = clamp(p.x / V.cw, 0, 1);
+  const ny = clamp(p.y / V.ch, 0, 1);
+  const sx = clamp(d.start.x / V.cw, 0, 1);
+  const sy = clamp(d.start.y / V.ch, 0, 1);
+  if (d.mode === 'draw') {
+    if (V.eraseDraw) V.eraseDraw.rect = { x: Math.min(sx, nx), y: Math.min(sy, ny), w: Math.abs(nx - sx), h: Math.abs(ny - sy) };
+    return;
+  }
+  const r0 = d.r0;
+  if (d.mode === 'move') {
+    d.o.rect = { x: clamp(r0.x + nx - sx, 0, 1 - r0.w), y: clamp(r0.y + ny - sy, 0, 1 - r0.h), w: r0.w, h: r0.h };
+    return;
+  }
+  // corner: 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right; the opposite corner stays put
+  const left = d.ci === 0 || d.ci === 2;
+  const top = d.ci === 0 || d.ci === 1;
+  const fx = left ? r0.x + r0.w : r0.x;
+  const fy = top ? r0.y + r0.h : r0.y;
+  const mx = clamp((left ? r0.x : r0.x + r0.w) + nx - sx, 0, 1);
+  const my = clamp((top ? r0.y : r0.y + r0.h) + ny - sy, 0, 1);
+  const min = 0.02;
+  const x0 = left ? Math.min(mx, fx - min) : fx;
+  const x1 = left ? fx : Math.max(mx, fx + min);
+  const y0 = top ? Math.min(my, fy - min) : fy;
+  const y1 = top ? fy : Math.max(my, fy + min);
+  d.o.rect = normRect({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+}
+/** Wait for the user to drag a box on the preview (for a new eraser, or to redraw target's box). */
+function startEraseDraw(target = null) {
+  setPlaying(false);
+  V.eraseDraw = { target: target?.id || null, rect: null };
+  if (V.canvas) V.canvas.style.cursor = 'crosshair';
+  H.toast(H.isMobile() ? 'Drag on the video over what you want to hide' : 'Drag on the preview over what you want to hide (Esc to cancel)');
+  if (V.tab === 'effects') renderPanel();
+}
+function cancelEraseDraw() {
+  if (!V?.eraseDraw) return;
+  V.eraseDraw = null;
+  if (V.canvas) V.canvas.style.cursor = '';
+  if (V.tab === 'effects') renderPanel();
+}
+function finishEraseDraw() {
+  const d = V.eraseDraw;
+  const r = d?.rect;
+  if (!r || r.w * V.cw < 6 || r.h * V.ch < 6) {
+    if (d) d.rect = null;
+    return H.toast('Drag to draw a box over what you want to hide');
+  }
+  V.eraseDraw = null;
+  if (V.canvas) V.canvas.style.cursor = '';
+  const target = d.target && (V.p.effects || []).find((e) => e.id === d.target);
+  if (target) {
+    target.rect = normRect(r);
+    select({ kind: 'effect', id: target.id });
+    commit();
+    if (V.tab === 'effects') renderPanel();
+  } else addEraser(r);
+}
+/** New eraser over rect, lasting for the clip under the playhead. */
+function addEraser(rect, { whole = false } = {}) {
+  const total = totalDur();
+  const t = V.t >= total - 0.05 ? 0 : V.t;
+  const act = !whole && activeClip(t);
+  const start = act ? act.start : 0;
+  const dur = act ? clipDur(act.clip) : Math.max(0.5, V.p.clips.length ? mainDur() : total || 3);
+  const e = { id: uid(), kind: 'erase', fx: 'erase', mode: 'fill', rect: normRect(rect), feather: 0.4, amount: 1, color: '#000000', start, dur };
+  V.p.effects.push(e);
+  setPlaying(false);
+  if (V.t < start || V.t >= start + dur) seek(start + Math.min(0.5, dur / 2));
+  select({ kind: 'effect', id: e.id }, { open: true });
+  commit();
+  if (V.tab === 'effects') renderPanel();
+  H.toast('Area hidden — drag the box on the video to adjust it');
+  return e;
+}
+/** Quick area: moves the selected eraser there, or adds a new one. */
+function eraserPreset(id) {
+  const r = presetRect(id, V.p.width, V.p.height);
+  const cur = V.sel?.kind === 'effect' ? findSel() : null;
+  if (cur?.kind === 'erase') {
+    cur.rect = normRect(r);
+    setPlaying(false);
+    if (V.t < cur.start || V.t >= cur.start + cur.dur) seek(cur.start + Math.min(0.5, cur.dur / 2));
+    commit();
+    if (V.tab === 'effects') renderPanel();
+    return cur;
+  }
+  return addEraser(r);
+}
+/** Zoom the clips under a top/bottom band eraser so the band is pushed out of the frame. */
+function cropOutEraser(s) {
+  const r = s.rect;
+  const bottom = r.y + r.h / 2 > 0.5;
+  const h = clamp(bottom ? 1 - r.y : r.y + r.h, 0.02, 0.6);
+  const zoom = Math.min(3, 1 / (1 - h));
+  const y = (bottom ? 1 : -1) * (h / (1 - h));
+  const starts = clipStarts();
+  let n = 0;
+  V.p.clips.forEach((c, i) => {
+    if (c.type === 'color') return;
+    const a = starts[i];
+    const b = a + clipDur(c);
+    if (b <= s.start + 0.01 || a >= s.start + s.dur - 0.01) return;
+    c.tf = { ...(c.tf || {}), zoom: +zoom.toFixed(3), y: +y.toFixed(3), x: c.tf?.x || 0 };
+    n++;
+  });
+  if (!n) return H.toast('No clip under this box to crop');
+  V.p.effects = V.p.effects.filter((e) => e !== s);
+  V.sel = null;
+  commit();
+  H.toast(`Zoomed ${n} clip${n > 1 ? 's' : ''} in to crop the band out`);
 }
 
 // Drag text/stickers on the preview; drag the corner dot to resize.
@@ -1879,6 +2032,33 @@ function bindPreviewPointer() {
     const p = pos(e);
     const touch = e.pointerType === 'touch';
     pendingTap = null;
+    // "Remove area": draw a new box, or move / resize the selected one
+    if (V.eraseDraw) {
+      V.eraseDraw.rect = null;
+      drag = { erase: true, mode: 'draw', start: p };
+      V.eraseDrag = true;
+      cv.setPointerCapture(e.pointerId);
+      return;
+    }
+    const er = V.sel?.kind === 'effect' ? findSel() : null;
+    if (er?.kind === 'erase' && V.eraseBox) {
+      const b = V.eraseBox;
+      // fingers need a bigger target than the drawn dot
+      const rr = Math.max(b.r, (touch ? 22 : 12) * (V.cw / Math.max(1, cv.getBoundingClientRect().width)));
+      let ci = -1;
+      let best = rr;
+      b.corners.forEach(([x, y], i) => {
+        const d = Math.hypot(p.x - x, p.y - y);
+        if (d < best) { best = d; ci = i; }
+      });
+      const inside = p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h;
+      if (ci >= 0 || inside) {
+        drag = { erase: true, mode: ci >= 0 ? 'corner' : 'move', ci, o: er, start: p, r0: { ...er.rect } };
+        V.eraseDrag = true;
+        cv.setPointerCapture(e.pointerId);
+        return;
+      }
+    }
     const sel = V.sel?.kind === 'overlay' ? findSel() : null;
     if (sel && V.handle && Math.hypot(p.x - V.handle.x, p.y - V.handle.y) < V.handle.r) {
       const kv = keyed(sel, V.t - sel.start);
@@ -1902,6 +2082,18 @@ function bindPreviewPointer() {
   cv.addEventListener('pointermove', (e) => {
     if (pendingTap && (V.viewPinch || Math.hypot(e.clientX - pendingTap.x, e.clientY - pendingTap.y) > 10)) pendingTap = null;
     if (!drag) return;
+    if (drag.erase) {
+      if (V.viewPinch) {
+        // a pinch started: put the box back and stop
+        if (drag.o) drag.o.rect = drag.r0;
+        if (V.eraseDraw) V.eraseDraw.rect = null;
+        drag = null;
+        V.eraseDrag = false;
+        return;
+      }
+      eraseDragTo(drag, pos(e));
+      return;
+    }
     if (V.viewPinch) {
       // a pinch started: put the item back where it was and stop dragging it
       if (!drag.o.keys?.length) Object.assign(drag.o, drag.orig);
@@ -1930,6 +2122,22 @@ function bindPreviewPointer() {
   });
   const end = (e) => {
     const pinched = V.viewPinch;
+    if (drag?.erase) {
+      const d = drag;
+      drag = null;
+      V.eraseDrag = false;
+      if (e.type !== 'pointerup' || pinched) {
+        if (d.o) d.o.rect = d.r0;
+        if (V.eraseDraw) V.eraseDraw.rect = null;
+        return;
+      }
+      if (d.mode === 'draw') finishEraseDraw();
+      else if (JSON.stringify(d.o.rect) !== JSON.stringify(d.r0)) {
+        commit();
+        if (V.tab === 'effects') renderPanel();
+      }
+      return;
+    }
     if (pendingTap && e.type === 'pointerup' && !pinched) select(pendingTap.sel, { open: true });
     pendingTap = null;
     if (drag) {
@@ -2148,8 +2356,8 @@ function renderTimeline() {
     })
     .join('');
   const fxBlocks = fx.out
-    .map(([e, l]) => `<div class="tl-block fx ${e.kind === 'body' ? 'body' : ''} ${isSel('effect', e.id) ? 'sel' : ''}" data-kind="effect" data-id="${e.id}" style="left:${e.start * pps}px;width:${Math.max(6, e.dur * pps - 2)}px;top:${l * 30}px">
-      <span class="tl-label">${e.kind === 'body' ? '☺' : '✦'} ${H.esc(fxName(e.fx))}</span><i class="h-l"></i><i class="h-r"></i></div>`)
+    .map(([e, l]) => `<div class="tl-block fx ${e.kind === 'body' ? 'body' : e.kind === 'erase' ? 'erase' : ''} ${isSel('effect', e.id) ? 'sel' : ''}" data-kind="effect" data-id="${e.id}" style="left:${e.start * pps}px;width:${Math.max(6, e.dur * pps - 2)}px;top:${l * 30}px">
+      <span class="tl-label">${e.kind === 'erase' ? `⌫ Remove area · ${eraseModeName(e.mode)}` : `${e.kind === 'body' ? '☺' : '✦'} ${H.esc(fxName(e.fx))}`}</span><i class="h-l"></i><i class="h-r"></i></div>`)
     .join('');
   const auBlocks = au.out
     .map(([a, l]) => `<div class="tl-block au ${isSel('audio', a.id) ? 'sel' : ''}" data-kind="audio" data-id="${a.id}" style="left:${a.start * pps}px;width:${Math.max(6, (a.out - a.in) * pps - 2)}px;top:${l * 30}px">
@@ -2827,10 +3035,35 @@ function segStatusText() {
 function renderEffectsPanel(p) {
   const sec = V.fxSec || 'video';
   const cat = V.fxCat || 'All';
-  const sel = V.sel?.kind === 'effect' ? findSel() : null;
+  const selAny = V.sel?.kind === 'effect' ? findSel() : null;
+  const sel = selAny && (selAny.kind || 'video') === sec ? selAny : null;
+  const tabs = `<div class="seg full fx-secs"><button data-fsec="video" class="${sec === 'video' ? 'on' : ''}">${H.icon('sparkle', 14)} Video<span class="fx-sec-x"> effects</span></button><button data-fsec="body" class="${sec === 'body' ? 'on' : ''}">${H.icon('person', 14)} Body<span class="fx-sec-x"> effects</span></button><button data-fsec="erase" class="${sec === 'erase' ? 'on' : ''}">${eraseIcon(14)} Remove</button></div>`;
+  const bindSecs = () => $$('[data-fsec]', p).forEach((b) => (b.onclick = () => { V.fxSec = b.dataset.fsec; if (V.fxSec === 'body') warmSegmenter(); if (V.fxSec !== 'erase') cancelEraseDraw(); renderEffectsPanel(p); }));
+  if (sec === 'erase') {
+    const drawing = !!V.eraseDraw;
+    p.innerHTML = `<h3>Effects</h3>${tabs}
+      <p class="muted mt">Hide burned-in captions, logos, watermarks or date stamps. The box is filled in from the picture around it, frame by frame.</p>
+      <button class="btn ${drawing ? 'ghost' : 'primary'} full erase-draw" id="erDraw">${drawing ? `${H.icon('x', 14)} Cancel drawing` : `${eraseIcon(16)} Draw a box on the video`}</button>
+      ${drawing ? `<p class="fx-hint">Drag on the ${H.isMobile() ? 'video' : 'preview'} over what you want to hide.</p>` : ''}
+      <h4>Quick areas</h4>
+      ${sel ? `<p class="fx-hint">Tap an area to move the selected box there. <button class="linkish" id="fxNew">Add a new one instead</button></p>` : `<p class="muted fx-tip">Tap an area to hide it on the clip under the playhead.</p>`}
+      <div class="erase-grid">${ERASE_PRESETS.map(([id, name]) => {
+        const r = presetRect(id, V.p.width, V.p.height);
+        const a = V.p.width / V.p.height;
+        return `<button data-erp="${id}" title="${H.esc(name)}"><span class="erp-pic" style="aspect-ratio:${a > 1 ? '16 / 10' : a < 1 ? '10 / 14' : '1'}"><i style="left:${r.x * 100}%;top:${r.y * 100}%;width:${r.w * 100}%;height:${r.h * 100}%"></i></span><span>${H.esc(name)}</span></button>`;
+      }).join('')}</div>
+      <button class="btn ghost small mt" id="erWhole">Bottom captions on the whole video</button>`;
+    bindSecs();
+    $('#erDraw', p).onclick = () => (V.eraseDraw ? cancelEraseDraw() : startEraseDraw());
+    $$('[data-erp]', p).forEach((b) => (b.onclick = () => { cancelEraseDraw(); eraserPreset(b.dataset.erp); }));
+    $('#erWhole', p).onclick = () => { cancelEraseDraw(); addEraser(presetRect('bottom', V.p.width, V.p.height), { whole: true }); };
+    const nw = $('#fxNew', p);
+    if (nw) nw.onclick = () => { select(null); renderEffectsPanel(p); };
+    return;
+  }
   const list = sec === 'body' ? BODY_FX : VIDEO_FX.filter((f) => cat === 'All' || f.cat === cat);
   p.innerHTML = `<h3>Effects</h3>
-    <div class="seg full"><button data-fsec="video" class="${sec === 'video' ? 'on' : ''}">${H.icon('sparkle', 14)} Video effects</button><button data-fsec="body" class="${sec === 'body' ? 'on' : ''}">${H.icon('person', 14)} Body effects</button></div>
+    ${tabs}
     ${sec === 'video'
       ? `<div class="chips mt">${FX_CATS.map((c) => `<button class="chip ${c === cat ? 'on' : ''}" data-fcat="${c}">${c}</button>`).join('')}</div>`
       : `<p class="muted mt" id="segStatus">${segStatusText()}</p>`}
@@ -2838,7 +3071,7 @@ function renderEffectsPanel(p) {
     <p class="muted small-note fx-tip">${H.isMobile() ? 'Press and hold a preview to see it move.' : 'Point at a preview to see it move.'}</p>
     <div class="fx-grid">${list.map((f) => `<button class="fx-card ${sel?.fx === f.id ? 'on' : ''}" data-fx-add="${f.id}" title="${H.esc(f.name)}"><span class="fx-pic"><img src="${fxThumb(f.id, sec)}" alt=""></span><span>${H.esc(f.name)}</span></button>`).join('')}</div>`;
   if (!fxSamplesReady()) loadFxSamples().then(() => V && V.tab === 'effects' && renderEffectsPanel(p)).catch(() => {});
-  $$('[data-fsec]', p).forEach((b) => (b.onclick = () => { V.fxSec = b.dataset.fsec; if (V.fxSec === 'body') warmSegmenter(); renderEffectsPanel(p); }));
+  bindSecs();
   $$('[data-fcat]', p).forEach((b) => (b.onclick = () => { V.fxCat = b.dataset.fcat; renderEffectsPanel(p); }));
   $$('[data-fx-add]', p).forEach((b) => {
     b.onclick = () => { addEffectLayer(sec, b.dataset.fxAdd); renderEffectsPanel(p); };
@@ -3721,7 +3954,7 @@ function renderInspector() {
       ${voiceSection(V.p.audio.find((a) => a.voiceOf === s.id)?.voice || 'none')}` : ''}
       <h4>Clip motion</h4>
       <div class="filter-grid">${EFFECTS.map(([id, l]) => `<button data-fx="${id}" class="${(s.effect || 'none') === id ? 'on' : ''}">${l}</button>`).join('')}</div>
-      <div class="row wrap mt"><button class="btn ghost small" id="cMoreFx">${H.icon('sparkle', 14)} Video & body effects</button>${idx > 0 ? `<button class="btn ghost small" id="cMoreTr">${H.icon('transition', 14)} Transitions</button>` : ''}</div>
+      <div class="row wrap mt"><button class="btn ghost small" id="cMoreFx">${H.icon('sparkle', 14)} Video & body effects</button>${s.type !== 'color' ? `<button class="btn ghost small" id="cErase">${eraseIcon(14)} Remove area</button>` : ''}${idx > 0 ? `<button class="btn ghost small" id="cMoreTr">${H.icon('transition', 14)} Transitions</button>` : ''}</div>
       ${s.type !== 'color' ? `<h4>Crop & position</h4>
       <label class="frow">Zoom <input type="range" id="tZoom" min="1" max="3" step="0.02" value="${tf.zoom || 1}"></label>
       <label class="frow">Move left / right <input type="range" id="tX" min="-1" max="1" step="0.01" value="${tf.x || 0}"></label>
@@ -3787,6 +4020,7 @@ function renderInspector() {
     on('#cTrDur', 'onchange', () => commit());
     on('#cTrAll', 'onclick', () => { V.p.clips.forEach((c, i) => { if (i > 0) c.transition = { ...s.transition }; }); commit(); H.toast('Applied to all clips'); });
     on('#cMoreFx', 'onclick', () => { V.tab = 'effects'; V.panelOpen = true; if (H.isMobile()) V.inspectorOpen = false; syncPanels(); renderPanel(); });
+    on('#cErase', 'onclick', () => { V.fxSec = 'erase'; V.tab = 'effects'; V.panelOpen = true; if (H.isMobile()) V.inspectorOpen = false; syncPanels(); renderPanel(); });
     on('#cMoreTr', 'onclick', () => openTransitions(idx));
     on('#cLeft', 'onclick', () => moveClip(-1));
     on('#cRight', 'onclick', () => moveClip(1));
@@ -3889,6 +4123,10 @@ function renderInspector() {
     on('#oDel', 'onclick', deleteSel);
     return;
   }
+  if (kind === 'effect' && s.kind === 'erase') {
+    renderEraseInspector(el, s);
+    return;
+  }
   if (kind === 'effect') {
     const body = s.kind === 'body';
     const opts = body ? BODY_FX : VIDEO_FX;
@@ -3940,6 +4178,62 @@ function renderInspector() {
     $$('[data-voice]', el).forEach((b) => (b.onclick = () => applyVoiceToTrack(s, b.dataset.voice)));
     bindBeatSection(el, s);
   }
+}
+
+function renderEraseInspector(el, s) {
+  const r = s.rect;
+  const mode = s.mode || 'fill';
+  const band = r.w > 0.8 && r.h <= 0.45 && (r.y < 0.03 || r.y + r.h > 0.97);
+  const hint = { fill: 'Fills the box from the picture around it. Best for text over sky, walls, water or other simple backgrounds.', blur: 'Blurs what is in the box so it can’t be read.', pixelate: 'Turns what is in the box into big squares.', color: 'Covers the box with a solid colour.' }[mode];
+  el.innerHTML = `<h3>${eraseIcon(18)} Remove area</h3>
+    <p class="muted">From ${fmt(s.start)} for ${s.dur.toFixed(1)}s. Drag the box on the ${H.isMobile() ? 'video' : 'preview'} to move it, or a corner to resize it.</p>
+    <div class="field"><label>How to hide it</label><div class="seg full">${ERASE_MODES.map(([id, l]) => `<button data-emode="${id}" class="${mode === id ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+    <p class="muted small-note">${hint}</p>
+    ${mode === 'blur' || mode === 'pixelate' ? `<div class="field"><label>Strength <b>${Math.round((s.amount ?? 1) * 100)}%</b></label><input type="range" id="eAmt" min="0.3" max="2" step="0.05" value="${s.amount ?? 1}"></div>` : ''}
+    ${mode === 'color' ? `<div class="field"><label>Color</label><input type="color" id="eColor" value="${/^#[0-9a-f]{6}$/i.test(s.color || '') ? s.color : '#000000'}"></div>` : ''}
+    <div class="field"><label>Soft edge <b>${Math.round((s.feather ?? 0.4) * 100)}%</b></label><input type="range" id="eFeather" min="0" max="1" step="0.05" value="${s.feather ?? 0.4}"></div>
+    <div class="row wrap"><button class="btn ghost small" id="eDraw">${eraseIcon(14)} Draw again</button><button class="btn ghost small" id="eCmp" title="Hold to see the original">${H.icon('eye', 14)} Hold to compare</button></div>
+    <div class="field mt"><label>Move to</label><div class="chips">${ERASE_PRESETS.map(([id, n]) => `<button class="chip" data-erp="${id}">${H.esc(n)}</button>`).join('')}</div></div>
+    <div class="grid2"><label>Starts at (s)<input type="number" id="eStart" step="0.1" min="0" value="${s.start.toFixed(1)}"></label>
+      <label>Duration (s)<input type="number" id="eDur" step="0.1" min="0.2" value="${s.dur.toFixed(1)}"></label></div>
+    <div class="row wrap mt"><button class="btn ghost small" id="ePlay">${H.icon('play', 14)} Preview</button><button class="btn ghost small" id="eFull">Whole video</button><button class="btn ghost small" id="eClip">Match clip</button></div>
+    ${band ? `<div class="row wrap"><button class="btn ghost small" id="eCrop">${H.icon('resize', 14)} Crop it out instead</button></div><p class="muted small-note">Zooms the clip in so the band is outside the frame.</p>` : ''}
+    <div class="row wrap"><button class="btn ghost small" id="eDup">Duplicate</button><button class="btn ghost small" id="eSplit">Split</button><button class="btn ghost small" id="eDel">Delete</button></div>`;
+  if (el.dataset.eraseId !== s.id) {
+    // a newly selected box: show its inspector from the top (mode buttons first)
+    el.dataset.eraseId = s.id;
+    el.scrollTop = 0;
+    // the sheet may only be shown after this render (phones)
+    requestAnimationFrame(() => (el.scrollTop = 0));
+  }
+  const on = (id, ev, fn) => { const x = $(id, el); if (x) x[ev] = fn; };
+  $$('[data-emode]', el).forEach((b) => (b.onclick = () => { s.mode = b.dataset.emode; setPlaying(false); commit(); }));
+  on('#eAmt', 'oninput', (e) => { s.amount = +e.target.value; e.target.previousElementSibling.querySelector('b').textContent = Math.round(s.amount * 100) + '%'; });
+  on('#eAmt', 'onchange', () => commit());
+  on('#eColor', 'oninput', (e) => { s.color = e.target.value; });
+  on('#eColor', 'onchange', () => commit());
+  on('#eFeather', 'oninput', (e) => { s.feather = +e.target.value; e.target.previousElementSibling.querySelector('b').textContent = Math.round(s.feather * 100) + '%'; });
+  on('#eFeather', 'onchange', () => commit());
+  on('#eDraw', 'onclick', () => startEraseDraw(s));
+  const cmp = $('#eCmp', el);
+  if (cmp) {
+    const off = () => (V.eraseOff = false);
+    cmp.onpointerdown = (e) => { e.preventDefault(); V.eraseOff = true; };
+    cmp.onpointerup = off;
+    cmp.onpointerleave = off;
+    cmp.onpointercancel = off;
+    cmp.oncontextmenu = (e) => e.preventDefault();
+  }
+  $$('[data-erp]', el).forEach((b) => (b.onclick = () => eraserPreset(b.dataset.erp)));
+  on('#eStart', 'onchange', (e) => { s.start = Math.max(0, +e.target.value || 0); commit(); });
+  on('#eDur', 'onchange', (e) => { s.dur = Math.max(0.2, +e.target.value || 1); commit(); });
+  on('#ePlay', 'onclick', () => previewRange(s.start, s.start + Math.min(s.dur, 4)));
+  on('#eFull', 'onclick', () => { s.start = 0; s.dur = Math.max(0.5, V.p.clips.length ? mainDur() : totalDur()); commit(); });
+  on('#eClip', 'onclick', () => { const act = activeClip(clamp(V.t, s.start, s.start + s.dur - 0.01)) || activeClip(s.start); if (act) { s.start = act.start; s.dur = clipDur(act.clip); commit(); } });
+  on('#eCrop', 'onclick', () => cropOutEraser(s));
+  on('#eDup', 'onclick', duplicateSel);
+  on('#eSplit', 'onclick', splitAtPlayhead);
+  on('#eDel', 'onclick', deleteSel);
 }
 
 // ---------- export ----------
