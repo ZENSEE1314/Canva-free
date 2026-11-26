@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "start": "node server.js",
+    "start": "node --max-http-header-size=131072 server.js",
     "preview": "npm run build && npm start"
   },
   "engines": {

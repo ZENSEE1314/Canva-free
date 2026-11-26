@@ -3,12 +3,27 @@
 // any other media, keeping the credit line (title, author, licence, source) on the media.
 
 export const VIDEO_CATS = ['Nature', 'City', 'People', 'Food', 'Travel', 'Sports', 'Abstract', 'Business'];
-export const MUSIC_MOODS = ['Happy', 'Chill', 'Epic', 'Romantic', 'Sad', 'Upbeat', 'Lo-fi', 'Cinematic'];
+export const MUSIC_MOODS = ['Happy', 'Chill', 'Epic', 'Romantic', 'Sad', 'Upbeat', 'Lo-fi', 'Cinematic', 'Piano', 'Guitar', 'Electronic', 'Hip hop', 'Jazz', 'Rock', 'Acoustic', 'Ambient', 'Dance', 'Funny'];
 
 const state = {
-  videos: { q: '', cat: '', items: [], page: 1, hasMore: false, busy: false, msg: '', loaded: false, adding: null },
-  audio: { q: '', cat: 'Chill', items: [], page: 1, hasMore: false, busy: false, msg: '', loaded: false, adding: null },
+  videos: { q: '', cat: '', src: 'all', items: [], page: 1, hasMore: false, busy: false, msg: '', loaded: false, adding: null },
+  audio: { q: '', cat: 'Chill', src: 'all', items: [], page: 1, hasMore: false, busy: false, msg: '', loaded: false, adding: null },
 };
+/** Libraries the server can search (fetched once): { audio: [{id, name}], videos: [...] }. */
+let sources = null;
+let sourcesP = null;
+function loadSources() {
+  if (!sourcesP)
+    sourcesP = fetch('/api/stock/sources')
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null)
+      .then((d) => {
+        if (d && d.audio) sources = d;
+        else sourcesP = null;
+        return sources;
+      });
+  return sourcesP;
+}
 let preview = null;
 
 const fmtDur = (s) => {
@@ -57,7 +72,7 @@ async function search(kind, more) {
   const page = more ? s.page + 1 : 1;
   const q = s.q.trim() || s.cat;
   try {
-    const r = await fetch(`/api/stock/${kind === 'videos' ? 'videos' : 'audio'}?q=${encodeURIComponent(q)}&page=${page}`);
+    const r = await fetch(`/api/stock/${kind === 'videos' ? 'videos' : 'audio'}?q=${encodeURIComponent(q)}&page=${page}&source=${encodeURIComponent(s.src || 'all')}`);
     let j = null;
     try {
       j = await r.json();
@@ -78,8 +93,10 @@ async function search(kind, more) {
 
 const searchBox = (H, kind, cats) => {
   const s = state[kind];
-  return `<form class="stock-search" data-stock-form="${kind}"><input class="search" type="search" name="q" value="${H.esc(s.q)}" placeholder="${kind === 'videos' ? 'Search free stock videos' : 'Search free music'}" enterkeyhint="search"><button class="btn ghost small" type="submit">Search</button></form>
-    <div class="chips stock-chips">${cats.map((c) => `<button type="button" class="chip ${!s.q && s.cat === c ? 'on' : ''}" data-stock-cat="${H.esc(c)}">${H.esc(c)}</button>`).join('')}</div>`;
+  const libs = sources?.[kind === 'videos' ? 'videos' : 'audio'] || [];
+  return `<form class="stock-search" data-stock-form="${kind}"><input class="search" type="search" name="q" value="${H.esc(s.q)}" placeholder="${kind === 'videos' ? 'Search free stock videos' : 'Search songs, moods, genres, instruments…'}" enterkeyhint="search"><button class="btn ghost small" type="submit">Search</button></form>
+    <div class="chips stock-chips">${cats.map((c) => `<button type="button" class="chip ${!s.q && s.cat === c ? 'on' : ''}" data-stock-cat="${H.esc(c)}">${H.esc(c)}</button>`).join('')}</div>
+    ${libs.length > 1 ? `<div class="chips stock-chips stock-src" aria-label="Library">${[{ id: 'all', name: 'All libraries' }, ...libs].map((x) => `<button type="button" class="chip ${(s.src || 'all') === x.id ? 'on' : ''}" data-stock-src="${H.esc(x.id)}">${H.esc(x.name)}</button>`).join('')}</div>` : ''}`;
 };
 
 /**
@@ -124,6 +141,7 @@ export function renderStockVideos(host, ctx) {
     }));
   };
   draw();
+  if (!sources) loadSources().then((d) => d && draw());
 }
 
 /** Stock music section. ctx: { H, inPreview, addAudio(file, credit) → Promise }. */
@@ -139,7 +157,7 @@ export function renderStockMusic(host, ctx) {
     host.innerHTML = `${searchBox(H, 'audio', MUSIC_MOODS)}
       <div class="mus-list stock-list">${s.items.map((it, i) => `<div class="mus-item">
         <button type="button" class="mus-play ${preview?.i === i ? 'on' : ''}" data-sap="${i}" title="Preview" aria-label="Preview ${H.esc(it.title || '')}">${H.icon(preview?.i === i ? 'pause' : 'play', 16)}</button>
-        <div class="mus-meta"><b>${H.esc(it.title || 'Untitled')}</b><small>${H.esc(it.author || '')}${it.duration ? ` · ${fmtDur(it.duration)}` : ''}${it.license ? ` · ${H.esc(it.license)}` : ''}</small></div>
+        <div class="mus-meta"><b>${H.esc(it.title || 'Untitled')}</b><small>${H.esc(it.author || '')}${it.duration ? ` · ${fmtDur(it.duration)}` : ''}${it.license ? ` · ${H.esc(it.license)}` : ''}${it.source ? ` · ${H.esc(it.source)}` : ''}</small></div>
         <button type="button" class="btn ghost small" data-saa="${i}" ${s.adding != null ? 'disabled' : ''}>${s.adding === i ? H.esc(s.addMsg || 'Adding…') : 'Add'}</button></div>`).join('')}</div>
       <p class="muted stock-msg" aria-live="polite">${H.esc(s.busy ? 'Searching…' : s.msg)}</p>
       ${s.hasMore && !s.busy ? `<button type="button" class="btn ghost small block" data-stock-more>Load more</button>` : ''}`;
@@ -183,6 +201,7 @@ export function renderStockMusic(host, ctx) {
     }));
   };
   draw();
+  if (!sources) loadSources().then((d) => d && draw());
   if (!s.loaded && !s.busy) search('audio').then(draw);
 }
 
@@ -210,6 +229,11 @@ function bindSearch(host, kind, draw) {
   host.querySelectorAll('[data-stock-cat]').forEach((b) => (b.onclick = () => {
     s.q = '';
     s.cat = b.dataset.stockCat;
+    search(kind).then(draw);
+    draw();
+  }));
+  host.querySelectorAll('[data-stock-src]').forEach((b) => (b.onclick = () => {
+    s.src = b.dataset.stockSrc;
     search(kind).then(draw);
     draw();
   }));

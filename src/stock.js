@@ -13,6 +13,19 @@ const SI = {
 };
 const si = (n, s = 16) => `<svg class="ic" viewBox="0 0 24 24" width="${s}" height="${s}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${SI[n]}</svg>`;
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+/** The libraries the server can search, e.g. { images: [{id, name}], audio: [...] } (fetched once). */
+let sourcesP = null;
+export function stockSources() {
+  if (!sourcesP)
+    sourcesP = fetch('/api/stock/sources')
+      .then((r) => (r.ok ? r.json() : {}))
+      .catch(() => ({}))
+      .then((d) => {
+        if (!d || !d.images) sourcesP = null;
+        return d || {};
+      });
+  return sourcesP;
+}
 export const creditLine = (it) => `${it.title || 'Untitled'} — ${it.author || 'Unknown'}${it.license ? `, ${it.license}` : ''}`;
 
 /** Candidate URLs for the full photo, best first (the original, then a full-size copy from Openverse). */
@@ -49,13 +62,15 @@ export async function resolveStockImage(it) {
 export function renderStockTab(p, h, st) {
   st.q ??= '';
   st.cat ??= 'Nature';
+  st.src ??= 'all';
   p.innerHTML = `
     <h3>Photos</h3>
     <form class="ph-search" id="stockForm" role="search">
       ${si('search')}<input class="search" id="stockQ" placeholder="Search free stock photos" value="${esc(st.q)}" enterkeyhint="search" autocomplete="off">
     </form>
     <div class="chips ph-chips">${STOCK_CATEGORIES.map((c) => `<button class="chip ${!st.q && st.cat === c ? 'on' : ''}" data-scat="${c}">${c}</button>`).join('')}</div>
-    <p class="muted tiny ph-note">Free, openly licensed photos (Openverse · Wikimedia Commons). Click to add — or into a selected photo frame. Check the licence before commercial use and credit the author where asked.</p>
+    <div class="chips ph-chips ph-src" id="stockSrc" aria-label="Photo library"></div>
+    <p class="muted tiny ph-note">Free, openly licensed photos from several libraries (Openverse, Wikimedia Commons, NASA, The Met, Art Institute of Chicago…). Click to add — or into a selected photo frame. Check the licence before commercial use and credit the author where asked.</p>
     <div class="img-grid ph-grid" id="photoGrid"></div>
     <p class="muted ph-msg" id="stockMsg" hidden></p>
     <button class="btn ghost block" id="morePhotos" hidden>Load more</button>`;
@@ -112,7 +127,7 @@ export function renderStockTab(p, h, st) {
     setMsg(page === 1 ? 'Searching…' : 'Loading more…');
     const q = st.q || st.cat;
     try {
-      const r = await fetch(`/api/stock/images?q=${encodeURIComponent(q)}&page=${page}`);
+      const r = await fetch(`/api/stock/images?q=${encodeURIComponent(q)}&page=${page}&source=${encodeURIComponent(st.src)}`);
       const data = await r.json().catch(() => ({}));
       if (my !== token) return;
       if (!r.ok) throw new Error(data.error || 'Search failed');
@@ -178,6 +193,23 @@ export function renderStockTab(p, h, st) {
       })
   );
   more.onclick = () => load(false);
+  // library picker: All, or one library
+  stockSources().then((d) => {
+    const box = p.querySelector('#stockSrc');
+    const list = d.images || [];
+    if (!box || !box.isConnected || list.length < 2) return;
+    if (st.src !== 'all' && !list.some((x) => x.id === st.src)) st.src = 'all';
+    box.innerHTML = [{ id: 'all', name: 'All libraries' }, ...list].map((x) => `<button class="chip ${st.src === x.id ? 'on' : ''}" data-ssrc="${esc(x.id)}">${esc(x.name)}</button>`).join('');
+    box.querySelectorAll('[data-ssrc]').forEach(
+      (b) =>
+        (b.onclick = () => {
+          st.src = b.dataset.ssrc;
+          box.querySelectorAll('[data-ssrc]').forEach((x) => x.classList.toggle('on', x === b));
+          fallback = false;
+          load(true);
+        })
+    );
+  });
   // infinite scroll: load the next page when "Load more" comes into view
   const io = new IntersectionObserver(
     (es) => {

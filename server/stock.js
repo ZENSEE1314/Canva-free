@@ -1,6 +1,10 @@
 // Free stock media search: openly licensed photos, audio and video — no API key needed.
-// Photos + audio: Openverse (openverse.org). Video: Wikimedia Commons.
-// Optional: set PEXELS_API_KEY or PIXABAY_API_KEY to use those providers for photos and videos.
+// Photos: Openverse, Wikimedia Commons, NASA, The Met, Art Institute of Chicago.
+// Music: Openverse (incl. Freesound, Jamendo, Wikimedia audio), Internet Archive (netlabels), Wikimedia Commons.
+// Video: Wikimedia Commons.
+// Several libraries are searched at once and their results are mixed (?source=<id> picks one).
+// Optional keys (environment variables) add more libraries:
+//   JAMENDO_CLIENT_ID (music), UNSPLASH_ACCESS_KEY (photos), PEXELS_API_KEY / PIXABAY_API_KEY (photos and videos).
 //
 // Every route answers with the same shape:
 //   { items: [{ id, title, thumb, url, width, height, duration, author, license, source, link }], page, hasMore }
@@ -39,10 +43,14 @@ function cached(key, fn) {
   return p;
 }
 
-async function getJSON(url, headers = {}) {
-  const r = await fetch(url, { headers: { 'User-Agent': STOCK_UA, Accept: 'application/json', ...headers }, signal: AbortSignal.timeout(TIMEOUT) });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+async function getJSON(url, headers = {}, tries = 2) {
+  for (let i = 1; ; i++) {
+    const r = await fetch(url, { headers: { 'User-Agent': STOCK_UA, Accept: 'application/json', ...headers }, signal: AbortSignal.timeout(TIMEOUT) });
+    if (r.ok) return r.json();
+    // libraries like Openverse sometimes answer 500/502/504 for a moment: try once more
+    if (i >= tries || r.status < 500) throw new Error(`HTTP ${r.status}`);
+    await new Promise((res) => setTimeout(res, 700));
+  }
 }
 
 const strip = (html) =>
@@ -219,6 +227,344 @@ async function freeImages(q, page) {
   return commonsImages(q, page);
 }
 
+// ---------- licences ----------
+/** 'http://creativecommons.org/licenses/by-nc-sa/3.0/' → 'CC BY-NC-SA 3.0' */
+function ccFromUrl(u) {
+  const s = String(u || '').toLowerCase();
+  if (!s) return '';
+  if (/publicdomain\/zero/.test(s)) return 'CC0';
+  if (/publicdomain/.test(s)) return 'Public Domain';
+  const m = s.match(/licenses\/([a-z-]+)\/(\d(?:\.\d)?)/);
+  return m ? `CC ${m[1].toUpperCase()} ${m[2]}` : 'Creative Commons';
+}
+const secs = (v) => {
+  if (v == null || v === '') return 0;
+  if (/^\d+(\.\d+)?$/.test(String(v))) return Math.round(+v * 10) / 10;
+  const parts = String(v).split(':').map(Number);
+  if (parts.some((x) => !Number.isFinite(x))) return 0;
+  return parts.reduce((a, x) => a * 60 + x, 0);
+};
+/** Run fn over items with at most n at a time. */
+async function pool(items, n, fn) {
+  const out = new Array(items.length);
+  let i = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(n, items.length) }, async () => {
+      while (i < items.length) {
+        const k = i++;
+        try {
+          out[k] = await fn(items[k], k);
+        } catch {
+          out[k] = null;
+        }
+      }
+    })
+  );
+  return out;
+}
+
+// ---------- Internet Archive: Creative Commons music from netlabels ----------
+async function archiveAudio(q, page) {
+  const rows = 12;
+  const u = new URL('https://archive.org/advancedsearch.php');
+  u.searchParams.set('q', `(${q || 'music'}) AND collection:netlabels AND mediatype:audio AND licenseurl:*creativecommons*`);
+  for (const f of ['identifier', 'title', 'creator', 'licenseurl']) u.searchParams.append('fl[]', f);
+  u.searchParams.set('rows', String(rows));
+  u.searchParams.set('page', String(page));
+  u.searchParams.append('sort[]', 'downloads desc');
+  u.searchParams.set('output', 'json');
+  const data = await getJSON(u);
+  const docs = data.response?.docs || [];
+  const found = await pool(docs, 6, async (d) => {
+    const meta = await getJSON(`https://archive.org/metadata/${encodeURIComponent(d.identifier)}`);
+    const files = (meta.files || []).filter((f) => /\.(mp3|ogg)$/i.test(f.name || '') && f.source === 'original' ? true : /\.(mp3)$/i.test(f.name || ''));
+    // prefer MP3 (plays everywhere), the first track of the album
+    const f = files.sort((a, b) => /\.mp3$/i.test(b.name) - /\.mp3$/i.test(a.name) || String(a.track || a.name).localeCompare(String(b.track || b.name), undefined, { numeric: true }))[0];
+    if (!f) return null;
+    const path = String(f.name).split('/').map(encodeURIComponent).join('/');
+    const creator = Array.isArray(d.creator) ? d.creator[0] : d.creator;
+    return {
+      id: `ia:${d.identifier}`,
+      title: strip(f.title || d.title || f.name.replace(/\.\w+$/, '')),
+      thumb: `https://archive.org/services/img/${encodeURIComponent(d.identifier)}`,
+      url: `https://archive.org/download/${encodeURIComponent(d.identifier)}/${path}`,
+      width: 0,
+      height: 0,
+      duration: secs(f.length),
+      author: strip(f.artist || f.creator || creator) || 'Internet Archive',
+      license: ccFromUrl(Array.isArray(d.licenseurl) ? d.licenseurl[0] : d.licenseurl) || 'Creative Commons',
+      source: 'Internet Archive',
+      link: `https://archive.org/details/${encodeURIComponent(d.identifier)}`,
+    };
+  });
+  return { items: found.filter(Boolean), page, hasMore: page * rows < Math.min(data.response?.numFound || 0, 600) };
+}
+
+// ---------- Wikimedia Commons audio ----------
+async function commonsAudio(q, page) {
+  const per = 15;
+  const u = new URL('https://commons.wikimedia.org/w/api.php');
+  const params = {
+    action: 'query',
+    format: 'json',
+    formatversion: '2',
+    generator: 'search',
+    gsrnamespace: '6',
+    gsrsearch: `filetype:audio ${q || 'music'}`,
+    gsrlimit: String(per),
+    gsroffset: String((page - 1) * per),
+    prop: 'videoinfo',
+    viprop: 'url|size|mime|extmetadata|derivatives|mediatype',
+    viextmetadatafilter: 'Artist|LicenseShortName|ObjectName',
+  };
+  for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
+  const data = await getJSON(u);
+  const pages = (data.query?.pages || []).sort((a, b) => (a.index || 0) - (b.index || 0));
+  const items = [];
+  for (const pg of pages) {
+    const info = pg.videoinfo?.[0] || pg.imageinfo?.[0];
+    if (!info || (info.mediatype && info.mediatype !== 'AUDIO')) continue;
+    const ders = info.derivatives || [];
+    const mp3 = ders.find((d) => /audio\/mpeg/.test(d.type || '') && /^https:/.test(d.src || ''));
+    const url = mp3?.src || (/^audio\/(mpeg|ogg|wav|x-wav|flac)/.test(info.mime || '') ? noUtm(info.url) : '');
+    if (!url) continue;
+    const md = info.extmetadata || {};
+    items.push({
+      id: `wma:${pg.pageid}`,
+      title: strip(md.ObjectName?.value) || pg.title.replace(/^File:/, '').replace(/\.\w+$/, ''),
+      thumb: '',
+      url,
+      width: 0,
+      height: 0,
+      duration: Math.round(num(info.duration) * 10) / 10,
+      author: strip(md.Artist?.value).slice(0, 120) || 'Wikimedia Commons contributor',
+      license: strip(md.LicenseShortName?.value) || 'See source page',
+      source: 'Wikimedia Commons',
+      link: info.descriptionurl || '',
+    });
+  }
+  return { items, page, hasMore: !!data.continue };
+}
+
+// ---------- Jamendo (optional key: JAMENDO_CLIENT_ID, free at devportal.jamendo.com) ----------
+async function jamendo(q, page) {
+  const per = 20;
+  const u = new URL('https://api.jamendo.com/v3.0/tracks/');
+  u.searchParams.set('client_id', process.env.JAMENDO_CLIENT_ID);
+  u.searchParams.set('format', 'json');
+  u.searchParams.set('limit', String(per));
+  u.searchParams.set('offset', String((page - 1) * per));
+  if (q) u.searchParams.set('search', q);
+  u.searchParams.set('audioformat', 'mp32');
+  u.searchParams.set('order', 'popularity_total');
+  const data = await getJSON(u);
+  const items = (data.results || [])
+    .filter((it) => it.audio)
+    .map((it) => ({
+      id: `jam:${it.id}`,
+      title: strip(it.name) || 'Untitled',
+      thumb: it.image || it.album_image || '',
+      url: it.audio,
+      width: 0,
+      height: 0,
+      duration: num(it.duration),
+      author: strip(it.artist_name) || 'Jamendo artist',
+      license: ccFromUrl(it.license_ccurl) || 'Creative Commons',
+      source: 'Jamendo',
+      link: it.shareurl || '',
+    }));
+  return { items, page, hasMore: items.length === per };
+}
+
+// ---------- NASA image library (public domain) ----------
+async function nasaImages(q, page) {
+  const u = new URL('https://images-api.nasa.gov/search');
+  u.searchParams.set('q', q || 'earth');
+  u.searchParams.set('media_type', 'image');
+  u.searchParams.set('page', String(page));
+  u.searchParams.set('page_size', '20');
+  const data = await getJSON(u);
+  const items = (data.collection?.items || [])
+    .map((it) => {
+      const d = it.data?.[0] || {};
+      const href = it.links?.find((l) => l.render === 'image')?.href || it.links?.[0]?.href || '';
+      if (!/^https:/.test(href)) return null;
+      return {
+        id: `nasa:${d.nasa_id}`,
+        title: strip(d.title) || 'NASA image',
+        thumb: href.replace(/~(medium|small|large|orig)\.(jpe?g|png)$/i, '~thumb.$2'),
+        url: href.replace(/~(thumb|small)\.(jpe?g|png)$/i, '~medium.$2'),
+        width: 0,
+        height: 0,
+        duration: 0,
+        author: strip(d.photographer || d.secondary_creator || d.center) || 'NASA',
+        license: 'Public Domain (NASA)',
+        source: 'NASA',
+        link: `https://images.nasa.gov/details/${encodeURIComponent(d.nasa_id || '')}`,
+      };
+    })
+    .filter(Boolean);
+  return { items, page, hasMore: !!data.collection?.links?.some((l) => l.rel === 'next') };
+}
+
+// ---------- The Metropolitan Museum of Art (public-domain artworks) ----------
+async function metImages(q, page) {
+  const per = 15;
+  const u = new URL('https://collectionapi.metmuseum.org/public/collection/v1.1/search');
+  u.searchParams.set('q', q || 'flowers');
+  u.searchParams.set('hasImages', 'true');
+  u.searchParams.set('isPublicDomain', 'true');
+  u.searchParams.set('limit', String(per));
+  u.searchParams.set('offset', String((page - 1) * per));
+  const data = await getJSON(u);
+  const ids = data.objectIDs || [];
+  const objs = await pool(ids, 8, (id) => getJSON(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${id}`));
+  const items = objs
+    .filter((o) => o && o.isPublicDomain && o.primaryImageSmall && /^https:/.test(o.primaryImageSmall))
+    .map((o) => ({
+      id: `met:${o.objectID}`,
+      title: strip(o.title) || 'Artwork',
+      thumb: o.primaryImageSmall,
+      url: o.primaryImage || o.primaryImageSmall,
+      width: 0,
+      height: 0,
+      duration: 0,
+      author: strip(o.artistDisplayName) || strip(o.culture) || 'The Met',
+      license: 'Public Domain (CC0)',
+      source: 'The Met',
+      link: o.objectURL || '',
+    }));
+  return { items, page, hasMore: page * per < Math.min(data.total || 0, 600) };
+}
+
+// ---------- Art Institute of Chicago (public-domain artworks) ----------
+async function aicImages(q, page) {
+  const per = 20;
+  const u = new URL('https://api.artic.edu/api/v1/artworks/search');
+  if (q) u.searchParams.set('q', q);
+  u.searchParams.set('query[term][is_public_domain]', 'true');
+  u.searchParams.set('fields', 'id,title,artist_title,image_id,thumbnail');
+  u.searchParams.set('limit', String(per));
+  u.searchParams.set('page', String(page));
+  const data = await getJSON(u, { 'AIC-User-Agent': STOCK_UA });
+  const iiif = data.config?.iiif_url || 'https://www.artic.edu/iiif/2';
+  const items = (data.data || [])
+    .filter((it) => it.image_id)
+    .map((it) => ({
+      id: `aic:${it.id}`,
+      title: strip(it.title) || 'Artwork',
+      thumb: `${iiif}/${it.image_id}/full/400,/0/default.jpg`,
+      url: `${iiif}/${it.image_id}/full/1686,/0/default.jpg`,
+      width: num(it.thumbnail?.width),
+      height: num(it.thumbnail?.height),
+      duration: 0,
+      author: strip(it.artist_title) || 'Art Institute of Chicago',
+      license: 'Public Domain (CC0)',
+      source: 'Art Institute of Chicago',
+      link: `https://www.artic.edu/artworks/${it.id}`,
+    }));
+  return { items, page, hasMore: page < Math.min(data.pagination?.total_pages || 0, 30) };
+}
+
+// ---------- Unsplash (optional key: UNSPLASH_ACCESS_KEY) ----------
+async function unsplash(q, page) {
+  const u = new URL(q ? 'https://api.unsplash.com/search/photos' : 'https://api.unsplash.com/photos');
+  if (q) u.searchParams.set('query', q);
+  u.searchParams.set('page', String(page));
+  u.searchParams.set('per_page', '24');
+  u.searchParams.set('content_filter', 'high');
+  const data = await getJSON(u, { Authorization: `Client-ID ${process.env.UNSPLASH_ACCESS_KEY}`, 'Accept-Version': 'v1' });
+  const list = Array.isArray(data) ? data : data.results || [];
+  const items = list.map((it) => ({
+    id: `uns:${it.id}`,
+    title: strip(it.alt_description || it.description) || 'Unsplash photo',
+    thumb: it.urls?.small || '',
+    url: it.urls?.regular || it.urls?.full || '',
+    width: num(it.width),
+    height: num(it.height),
+    duration: 0,
+    author: strip(it.user?.name) || 'Unsplash',
+    license: 'Unsplash License',
+    source: 'Unsplash',
+    link: it.links?.html ? `${it.links.html}?utm_source=artvas&utm_medium=referral` : '',
+  })).filter((it) => it.url);
+  return { items, page, hasMore: Array.isArray(data) ? items.length === 24 : page < (data.total_pages || 0) };
+}
+
+// ---------- searching several libraries at once ----------
+/** Which libraries can be searched for each kind (keyed ones only when their key is set). */
+function sourcesFor(kind) {
+  const env = process.env;
+  if (kind === 'images')
+    return [
+      env.UNSPLASH_ACCESS_KEY && { id: 'unsplash', name: 'Unsplash', run: unsplash },
+      env.PEXELS_API_KEY && { id: 'pexels', name: 'Pexels', run: (q, p) => pexels('images', q, p) },
+      env.PIXABAY_API_KEY && { id: 'pixabay', name: 'Pixabay', run: (q, p) => pixabay('images', q, p) },
+      { id: 'openverse', name: 'Openverse', run: (q, p) => openverse('images', q, p) },
+      { id: 'wikimedia', name: 'Wikimedia', run: commonsImages },
+      { id: 'nasa', name: 'NASA', run: nasaImages },
+      { id: 'met', name: 'The Met', run: metImages },
+      { id: 'aic', name: 'Art Institute', run: aicImages },
+    ].filter(Boolean);
+  if (kind === 'audio')
+    return [
+      env.JAMENDO_CLIENT_ID && { id: 'jamendo', name: 'Jamendo', run: jamendo },
+      { id: 'openverse', name: 'Openverse', run: (q, p) => openverse('audio', q, p) },
+      { id: 'archive', name: 'Internet Archive', run: archiveAudio },
+      { id: 'wikimedia', name: 'Wikimedia', run: commonsAudio },
+    ].filter(Boolean);
+  return [
+    env.PEXELS_API_KEY && { id: 'pexels', name: 'Pexels', run: (q, p) => pexels('videos', q, p) },
+    env.PIXABAY_API_KEY && { id: 'pixabay', name: 'Pixabay', run: (q, p) => pixabay('videos', q, p) },
+    { id: 'wikimedia', name: 'Wikimedia', run: commonsVideos },
+  ].filter(Boolean);
+}
+const SOURCE_TIMEOUT = 14000;
+/**
+ * Search every library (or just `source`) at the same time and mix the results, a few from each
+ * in turn. A slow or failing library is skipped instead of failing the whole search.
+ */
+async function searchAll(kind, q, page, source) {
+  const all = sourcesFor(kind);
+  const list = source && source !== 'all' ? all.filter((x) => x.id === source) : all;
+  if (!list.length) throw new Error('unknown library');
+  const results = await Promise.all(
+    list.map(async (src) => {
+      try {
+        const r = await Promise.race([
+          cached(`${kind}|${src.id}|${q.toLowerCase()}|${page}`, () => src.run(q, page)),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), SOURCE_TIMEOUT)),
+        ]);
+        return { src, r };
+      } catch (e) {
+        console.warn(`stock ${kind}/${src.id} failed:`, e?.message || e);
+        return { src, err: true };
+      }
+    })
+  );
+  const ok = results.filter((x) => !x.err);
+  if (!ok.length) throw new Error('all libraries failed');
+  const lists = ok.map((x) => x.r.items.filter(isSafe));
+  const items = [];
+  const seen = new Set();
+  for (let i = 0; lists.some((l) => i < l.length); i++)
+    for (const l of lists)
+      if (i < l.length) {
+        const it = l[i];
+        const key = `${it.source}|${it.url}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          items.push(it);
+        }
+      }
+  return {
+    items,
+    page,
+    hasMore: ok.some((x) => x.r.hasMore),
+    sources: results.map((x) => ({ id: x.src.id, name: x.src.name, count: x.err ? 0 : x.r.items.length, ok: !x.err })),
+  };
+}
+
 // ---------- Optional keyed providers ----------
 async function pexels(kind, q, page) {
   const key = process.env.PEXELS_API_KEY;
@@ -280,16 +626,21 @@ export function stockRouter() {
     const q = cleanQ(req.query.q);
     if (UNSAFE.test(q)) return res.json({ items: [], page: 1, hasMore: false });
     const page = pageOf(req.query.page);
+    const source = String(req.query.source || 'all').replace(/[^a-z]/g, '').slice(0, 20) || 'all';
     try {
-      const data = await cached(`${kind}|${q.toLowerCase()}|${page}`, () => run(q, page));
+      const data = await run(q, page, source);
       res.set('Cache-Control', 'public, max-age=600').json(safeOnly(data));
     } catch (e) {
       console.warn(`stock ${kind} failed:`, e?.message || e);
       res.status(502).json({ error: fail });
     }
   };
-  r.get('/images', handle('images', (q, page) => withKeyed('images', q, page, () => freeImages(q, page)), 'The free photo library is busy or unreachable right now. Try again in a minute.'));
-  r.get('/audio', handle('audio', (q, page) => openverse('audio', q, page), 'The free audio library is busy or unreachable right now. Try again in a minute.'));
-  r.get('/videos', handle('videos', (q, page) => withKeyed('videos', q, page, () => commonsVideos(q, page)), 'The free video library is busy or unreachable right now. Try again in a minute.'));
+  r.get('/sources', (_req, res) => {
+    const pick = (k) => sourcesFor(k).map(({ id, name }) => ({ id, name }));
+    res.json({ images: pick('images'), audio: pick('audio'), videos: pick('videos') });
+  });
+  r.get('/images', handle('images', (q, page, src) => searchAll('images', q, page, src), 'The free photo libraries are busy or unreachable right now. Try again in a minute.'));
+  r.get('/audio', handle('audio', (q, page, src) => searchAll('audio', q, page, src), 'The free music libraries are busy or unreachable right now. Try again in a minute.'));
+  r.get('/videos', handle('videos', (q, page, src) => searchAll('videos', q, page, src), 'The free video library is busy or unreachable right now. Try again in a minute.'));
   return r;
 }
