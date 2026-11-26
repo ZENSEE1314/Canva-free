@@ -2,6 +2,24 @@
 
 Artvas is a free all-in-one creative studio that runs in the browser. It has a design editor for social posts, posters and presentations, a timeline video editor for TikTok, Instagram Reels, Xiaohongshu (RED), Facebook and YouTube, and AI image and video generation.
 
+## Suite (free replacements for 9 paid apps)
+
+Open **Suite** on the home screen (or `#/suite/<tool>`). Everything runs in the browser and saves locally.
+
+| Tool | Replaces | Inspired by |
+| --- | --- | --- |
+| Docs | Notion | AppFlowy |
+| Tasks (kanban) | Asana | OpenProject |
+| Booking (slots, .ics) | Calendly | Cal.com |
+| Inbox (shared inbox) | Intercom | Chatwoot |
+| Recorder (screen + mic + camera) | Loom | Cap |
+| Dictation (speech to text, 12 languages) | Wispr Flow | OpenWhispr |
+| SEO checker | Semrush | OpenSEO |
+| Voice studio (text to speech) | ElevenLabs | Voicebox |
+| AI Studio (image and video) | Higgsfield | Open-Higgsfield-AI |
+
+These are lightweight built-in versions, not copies of the original projects.
+
 ## Video editor
 
 - **Platform presets**: TikTok, Instagram Reels, Xiaohongshu / RED (3:4), Facebook Reels and feed (4:5), YouTube Shorts, YouTube (16:9) and square.
