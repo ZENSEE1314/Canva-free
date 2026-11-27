@@ -27,6 +27,7 @@ import { startPresentation, bootPresenter, TRANSITIONS, _present } from './prese
 import * as collab from './collab.js';
 import { openShareDialog, openSharedLink, parseSharedHash, sicon } from './share.js';
 import { renderStockTab } from './stock.js';
+import { openSuite } from './suite.js';
 
 const PROPS = [
   'name', 'locked', 'selectable', 'evented', 'hasControls', 'lockMovementX', 'lockMovementY',
@@ -134,6 +135,7 @@ async function renderHome() {
         <button class="mode-card" data-mode="design"><span class="mc-ic">${icon('layout', 22)}</span><b>Design</b><small>Posts, posters, slides</small></button>
         <button class="mode-card" data-mode="video"><span class="mc-ic">${icon('film', 22)}</span><b>Video</b><small>Edit clips, text & music</small></button>
         <button class="mode-card" data-mode="ai"><span class="mc-ic">${icon('wand', 22)}</span><b>AI Image</b><small>Describe it, get it</small></button>
+        <button class="mode-card" data-mode="suite"><span class="mc-ic">${icon('layout', 22)}</span><b>Suite</b><small>Docs, tasks, booking & more</small></button>
       </div>
       <div class="custom-size">
         <input type="number" id="cw" value="1080" min="16" max="8000"> <span>×</span>
@@ -242,6 +244,7 @@ async function renderHome() {
       const m = b.dataset.mode;
       if (m === 'video') return $('#videoSection').scrollIntoView({ behavior: 'smooth' });
       if (m === 'design') return $('#designSection').scrollIntoView({ behavior: 'smooth' });
+      if (m === 'suite') return openSuite(app, { onBack: renderHome });
       state.tab = 'ai';
       await newDesign(1080, 1080, 'AI image');
     })
@@ -3700,6 +3703,8 @@ async function boot() {
       sh
     );
   }
+  const su = location.hash.match(/^#\/suite(?:\/(\w+))?/);
+  if (su) return openSuite(app, { tool: su[1], onBack: renderHome });
   const m = location.hash.match(/^#\/(?:design|video)\/(\w+)/) || location.pathname.match(/^\/design\/(\w+)/);
   if (m) {
     const d = await getDesign(m[1]).catch(() => null);
